@@ -16,7 +16,7 @@ class SavantDataUpdateCoordinator(DataUpdateCoordinator):
         hass: HomeAssistant,
         host: str,
         auth: aiohttp.BasicAuth,
-        update_interval: timedelta = timedelta(seconds=20),
+        update_interval: timedelta = timedelta(seconds=15),
         name: str = "savant_ipaudio",
     ):
         """Initialize the coordinator."""
@@ -160,35 +160,6 @@ class SavantDataUpdateCoordinator(DataUpdateCoordinator):
         except Exception as err:
             _LOGGER.error("Failed to set mute for port %s: %s", port, err, exc_info=True)
             raise
-
-    async def async_set_source(self, port, source):
-        """Set the input source for a zone with optimistic update and quick refresh."""
-        _LOGGER.debug("Setting source for port %s to %s", port, source)
-        try:
-            # Optimistically update local data
-            if "av" in self.data and "outputs" in self.data["av"]:
-                for output in self.data["av"]["outputs"]:
-                    if output["port"] == port:
-                        output["inputsrc"] = source
-                        break
-            self.async_update_listeners()
-            # Make API call using the correct endpoint format
-            url = f"http://{self.host}/cgi-bin/avswitch"
-            data = {
-                "action": "setAudio",
-                f"output{port}.inputsrc": str(source)
-            }
-            _LOGGER.debug("Sending source update to %s with data %s", url, data)
-            async with self.session.post(url, data=data, auth=self.auth) as response:
-                if response.status != 200:
-                    _LOGGER.error("Failed to set source: %s", await response.text())
-                    raise UpdateFailed(f"Failed to set source: {response.status}")
-                _LOGGER.debug("Successfully set source for port %s to %s", port, source)
-            # Schedule a refresh 1 second later
-            asyncio.create_task(self._delayed_refresh())
-        except Exception as e:
-            _LOGGER.error("Error setting source: %s", str(e), exc_info=True)
-            raise UpdateFailed(f"Error setting source: {str(e)}")
 
     async def _delayed_refresh(self):
         await asyncio.sleep(1)
