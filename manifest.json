@@ -1,7 +1,7 @@
 {
   "domain": "savant_ipaudio",
   "name": "Savant IP Audio",
-  "version": "0.6",
+  "version": "0.7",
   "documentation": "https://github.com/rohrsh/hass-savant-ipaudio",
   "issue_tracker": "https://github.com/rohrsh/hass-savant-ipaudio/issues",
   "dependencies": [],
