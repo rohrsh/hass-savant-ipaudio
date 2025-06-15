@@ -139,23 +139,39 @@ class SavantZone(MediaPlayerEntity):
         return self._name
 
     @property
+    def available(self):
+        """Return if entity is available."""
+        available = self._coordinator.last_update_success
+        _LOGGER.debug("Entity %s availability: %s", self.name, available)
+        return available
+
+    @property
     def state(self):
-        if not self._attr_available:
+        if not self.available:
+            _LOGGER.debug("Entity %s is unavailable", self.name)
             return STATE_UNAVAILABLE
-        return STATE_OFF if self._data["inputsrc"] == 0 else STATE_ON
+        state = STATE_OFF if self._data["inputsrc"] == 0 else STATE_ON
+        _LOGGER.debug("Entity %s state: %s (inputsrc: %s)", self.name, state, self._data["inputsrc"])
+        return state
 
     @property
     def volume_level(self):
         vol_db = self._data["volume"]
-        return max(0.0, min(1.0, (vol_db + 80) / 80))
+        volume = max(0.0, min(1.0, (vol_db + 80) / 80))
+        _LOGGER.debug("Entity %s volume: %s (raw: %s)", self.name, volume, vol_db)
+        return volume
 
     @property
     def is_volume_muted(self):
-        return self._data.get("mute", False)
+        muted = self._data.get("mute", False)
+        _LOGGER.debug("Entity %s mute state: %s", self.name, muted)
+        return muted
 
     @property
     def source(self):
-        return self._input_names.get(self._data["inputsrc"], f"Source {self._data['inputsrc']}")
+        source = self._input_names.get(self._data["inputsrc"], f"Source {self._data['inputsrc']}")
+        _LOGGER.debug("Entity %s source: %s (inputsrc: %s)", self.name, source, self._data["inputsrc"])
+        return source
 
     @property
     def source_list(self):
@@ -203,45 +219,59 @@ class SavantZone(MediaPlayerEntity):
 
     async def async_added_to_hass(self):
         """When entity is added to hass."""
+        _LOGGER.debug("Adding entity %s to hass", self.name)
         self.async_on_remove(
-            self._coordinator.async_add_listener(self._handle_coordinator_update)
+            self._coordinator.async_add_listener(self.async_write_ha_state)
         )
 
-    async def _handle_coordinator_update(self):
-        """Handle updated data from the coordinator."""
-        if self._coordinator.data and "outputs" in self._coordinator.data:
-            for output in self._coordinator.data["outputs"]:
-                if output["port"] == self._port:
-                    self._data = output
-                    self._attr_available = True
-                    self.async_write_ha_state()
-                    break
+    @property
+    def available(self):
+        """Return if entity is available."""
+        available = self._coordinator.last_update_success
+        _LOGGER.debug("Entity %s availability: %s", self.name, available)
+        return available
+
+    @property
+    def state(self):
+        if not self.available:
+            _LOGGER.debug("Entity %s is unavailable", self.name)
+            return STATE_UNAVAILABLE
+        state = STATE_OFF if self._data["inputsrc"] == 0 else STATE_ON
+        _LOGGER.debug("Entity %s state: %s (inputsrc: %s)", self.name, state, self._data["inputsrc"])
+        return state
 
     async def async_set_volume_level(self, volume):
         """Set volume level, range 0..1."""
+        _LOGGER.debug("Setting volume for %s to %s", self.name, volume)
         await self._coordinator.async_set_volume(self._port, volume)
 
     async def async_mute_volume(self, mute):
         """Mute the volume."""
+        _LOGGER.debug("Setting mute for %s to %s", self.name, mute)
         await self._coordinator.async_set_mute(self._port, mute)
 
     async def async_select_source(self, source):
         """Select input source."""
+        _LOGGER.debug("Selecting source for %s: %s", self.name, source)
         src_id = next((k for k, v in self._input_names.items() if v == source), None)
         if src_id is not None:
             await self._coordinator.async_set_source(self._port, src_id)
+        else:
+            _LOGGER.warning("Source %s not found for %s", source, self.name)
 
     async def async_turn_on(self):
         """Turn the media player on."""
+        _LOGGER.debug("Turning on %s", self.name)
         # Always select the first available input (lowest non-zero, non-off)
         src_id = next((k for k in sorted(self._input_names) if k != 0 and self._input_names[k].lower() != "off"), None)
         if src_id is not None:
             await self.async_select_source(self._input_names[src_id])
         else:
-            _LOGGER.warning("No valid input found to turn on zone %s.", self._port)
+            _LOGGER.warning("No valid input found to turn on %s", self.name)
 
     async def async_turn_off(self):
         """Turn the media player off."""
+        _LOGGER.debug("Turning off %s", self.name)
         # Try to find the input number for 'Off', fallback to 0
         off_id = next((k for k, v in self._input_names.items() if v.lower() == "off"), None)
         if off_id is not None:
@@ -253,10 +283,12 @@ class SavantZone(MediaPlayerEntity):
         """Volume up the media player."""
         current_volume = self.volume_level
         new_volume = min(1.0, current_volume + 0.05)
+        _LOGGER.debug("Volume up for %s: %s -> %s", self.name, current_volume, new_volume)
         await self.async_set_volume_level(new_volume)
 
     async def async_volume_down(self):
         """Volume down the media player."""
         current_volume = self.volume_level
         new_volume = max(0.0, current_volume - 0.05)
+        _LOGGER.debug("Volume down for %s: %s -> %s", self.name, current_volume, new_volume)
         await self.async_set_volume_level(new_volume)
