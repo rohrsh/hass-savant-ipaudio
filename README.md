@@ -11,6 +11,9 @@ This is an **unofficial** integration for Savant IP Audio systems. This integrat
 
 This integration interfaces with the Savant system's web interface in a way that is publicly accessible and does not bypass any security measures. It does not include any Savant proprietary code or reverse-engineered protocols. It does not require any changes to your Savant blueprints. 
 
+<img width="824" alt="image" src="https://github.com/user-attachments/assets/cae643be-327e-4c21-9190-50becf2ed16d" />
+
+
 ## What? 
 
 I built this for a Savant IP Audio 125. It is from a family of powered amps and media streamer. 
