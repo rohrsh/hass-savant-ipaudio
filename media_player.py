@@ -4,11 +4,11 @@ from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNAVAILABLE
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from datetime import timedelta
 from .const import DOMAIN
+from .coordinator import SavantDataUpdateCoordinator
 import aiohttp
 import logging
 import re
 
-SCAN_INTERVAL = timedelta(seconds=5)
 _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_INPUT_NAMES = {
@@ -34,6 +34,14 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
 
     session = async_get_clientsession(hass)
     auth = aiohttp.BasicAuth(username, password)
+
+    # Create coordinator
+    coordinator = SavantDataUpdateCoordinator(
+        hass,
+        host,
+        auth,
+        update_interval=timedelta(seconds=5)
+    )
 
     # Fetch device info
     model = None
@@ -84,9 +92,10 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
             ip_address = host
 
     try:
-        resp = await session.get(f"http://{host}/cgi-bin/avswitch?action=showAllAudioPortsInJson", auth=auth)
-        resp.raise_for_status()
-        data = await resp.json()
+        # Initial data fetch
+        await coordinator.async_config_entry_first_refresh()
+        data = coordinator.data
+        
         # Build input_names and output_names from device
         input_names = {inp["port"]: inp.get("name", f"Input {inp['port']}") for inp in data.get("inputs", [])}
         output_names = {out["port"]: out.get("name", f"Output {out['port']}") for out in data.get("outputs", [])}
@@ -100,7 +109,7 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
             input_names[0] = "Off"
         entities = [
             SavantZone(
-                output, session, host, auth, input_names, output_names,
+                output, coordinator, input_names, output_names,
                 model=model, unique_id=unique_id, firmware=firmware, ip_address=ip_address
             ) for output in data["outputs"]
         ]
@@ -110,22 +119,20 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
         return False
 
 class SavantZone(MediaPlayerEntity):
-    _attr_should_poll = True
+    _attr_should_poll = False
     _attr_available = True
 
-    def __init__(self, data, session, host, auth, input_names, output_names, model, unique_id, firmware, ip_address=None):
+    def __init__(self, data, coordinator, input_names, output_names, model, unique_id, firmware, ip_address=None):
         self._data = data
-        self._session = session
-        self._host = host
-        self._auth = auth
-        self._input_names = input_names  # shared dict for all zones
+        self._coordinator = coordinator
+        self._input_names = input_names
         self._output_names = output_names
         self._name = output_names.get(data['port'], f"Savant Zone {data['port']}")
         self._port = data["port"]
         self._model = model
-        self._unique_id = unique_id or host  # fallback to host if no unique_id
+        self._unique_id = unique_id or coordinator.host
         self._firmware = firmware
-        self._ip_address = ip_address or host
+        self._ip_address = ip_address or coordinator.host
 
     @property
     def name(self):
@@ -181,7 +188,7 @@ class SavantZone(MediaPlayerEntity):
             "manufacturer": "Savant",
             "model": self._model or "Unknown",
             "sw_version": self._firmware,
-            "configuration_url": f"http://{self._host}/",
+            "configuration_url": f"http://{self._coordinator.host}/",
         }
         # Add savant_id as a MAC address connection if it looks like a MAC
         if self._unique_id and len(self._unique_id) == 16:
@@ -194,49 +201,38 @@ class SavantZone(MediaPlayerEntity):
         exclude_keys = {"volume", "mute", "inputsrc", "port", "id"}
         return {k: v for k, v in self._data.items() if k not in exclude_keys}
 
-    async def async_update(self):
-        try:
-            resp = await self._session.get(f"http://{self._host}/cgi-bin/avswitch?action=showAllAudioPortsInJson", auth=self._auth)
-            resp.raise_for_status()
-            data = await resp.json()
-            self._data = data["outputs"][self._port - 1]
-            self._attr_available = True
-        except Exception as e:
-            _LOGGER.error("Failed to update Savant Zone %s: %s", self._port, str(e))
-            self._attr_available = False
+    async def async_added_to_hass(self):
+        """When entity is added to hass."""
+        self.async_on_remove(
+            self._coordinator.async_add_listener(self._handle_coordinator_update)
+        )
+
+    async def _handle_coordinator_update(self):
+        """Handle updated data from the coordinator."""
+        if self._coordinator.data and "outputs" in self._coordinator.data:
+            for output in self._coordinator.data["outputs"]:
+                if output["port"] == self._port:
+                    self._data = output
+                    self._attr_available = True
+                    self.async_write_ha_state()
+                    break
 
     async def async_set_volume_level(self, volume):
-        try:
-            level = int((volume * 80) - 80)
-            payload = {f"output{self._port}.volume": str(level)}
-            resp = await self._session.post(f"http://{self._host}/cgi-bin/avswitch?action=setAudio", data=payload, auth=self._auth)
-            resp.raise_for_status()
-            await self.async_update()
-        except Exception as e:
-            _LOGGER.error("Failed to set volume for Savant Zone %s: %s", self._port, str(e))
+        """Set volume level, range 0..1."""
+        await self._coordinator.async_set_volume(self._port, volume)
 
     async def async_mute_volume(self, mute):
-        try:
-            val = "muted" if mute else "not-muted"
-            payload = {f"output{self._port}.mute": val}
-            resp = await self._session.post(f"http://{self._host}/cgi-bin/avswitch?action=setAudio", data=payload, auth=self._auth)
-            resp.raise_for_status()
-            await self.async_update()
-        except Exception as e:
-            _LOGGER.error("Failed to set mute for Savant Zone %s: %s", self._port, str(e))
+        """Mute the volume."""
+        await self._coordinator.async_set_mute(self._port, mute)
 
     async def async_select_source(self, source):
-        try:
-            src_id = next((k for k, v in self._input_names.items() if v == source), None)
-            if src_id is not None:
-                payload = {f"output{self._port}.inputsrc": str(src_id)}
-                resp = await self._session.post(f"http://{self._host}/cgi-bin/avswitch?action=setAudio", data=payload, auth=self._auth)
-                resp.raise_for_status()
-                await self.async_update()
-        except Exception as e:
-            _LOGGER.error("Failed to select source for Savant Zone %s: %s", self._port, str(e))
+        """Select input source."""
+        src_id = next((k for k, v in self._input_names.items() if v == source), None)
+        if src_id is not None:
+            await self._coordinator.async_set_source(self._port, src_id)
 
     async def async_turn_on(self):
+        """Turn the media player on."""
         # Always select the first available input (lowest non-zero, non-off)
         src_id = next((k for k in sorted(self._input_names) if k != 0 and self._input_names[k].lower() != "off"), None)
         if src_id is not None:
@@ -245,21 +241,22 @@ class SavantZone(MediaPlayerEntity):
             _LOGGER.warning("No valid input found to turn on zone %s.", self._port)
 
     async def async_turn_off(self):
+        """Turn the media player off."""
         # Try to find the input number for 'Off', fallback to 0
         off_id = next((k for k, v in self._input_names.items() if v.lower() == "off"), None)
         if off_id is not None:
-            await self.async_select_source(self._input_names[off_id])
-        elif 0 in self._input_names:
-            await self.async_select_source(self._input_names[0])
+            await self._coordinator.async_set_source(self._port, off_id)
         else:
-            _LOGGER.warning("No 'Off' input found for zone %s; cannot turn off.", self._port)
+            await self._coordinator.async_set_source(self._port, 0)
 
     async def async_volume_up(self):
-        # Increase volume by a step (e.g., 0.05)
-        new_level = min(1.0, (self.volume_level or 0) + 0.05)
-        await self.async_set_volume_level(new_level)
+        """Volume up the media player."""
+        current_volume = self.volume_level
+        new_volume = min(1.0, current_volume + 0.05)
+        await self.async_set_volume_level(new_volume)
 
     async def async_volume_down(self):
-        # Decrease volume by a step (e.g., 0.05)
-        new_level = max(0.0, (self.volume_level or 0) - 0.05)
-        await self.async_set_volume_level(new_level)
+        """Volume down the media player."""
+        current_volume = self.volume_level
+        new_volume = max(0.0, current_volume - 0.05)
+        await self.async_set_volume_level(new_volume)
