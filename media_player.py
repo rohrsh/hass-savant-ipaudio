@@ -1,142 +1,127 @@
+from __future__ import annotations
+import logging
 from homeassistant.components.media_player import MediaPlayerEntity, MediaPlayerEntityFeature
 from homeassistant.components.media_player.const import MediaPlayerState
 from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNAVAILABLE
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.entity import DeviceInfo
 from datetime import timedelta
 from .const import DOMAIN
 from .coordinator import SavantDataUpdateCoordinator
 import aiohttp
-import logging
-import re
 
 _LOGGER = logging.getLogger(__name__)
 
-DEFAULT_INPUT_NAMES = {
-    0: "Off",
-    1: "Doorbell",
-    2: "Optical 2",
-    3: "RCA 1",
-    4: "RCA 2",
-    5: "Media Streamer"
-}
-
 async def async_setup_entry(hass, config_entry, async_add_entities):
+    """Set up the Savant IP Audio integration."""
     host = config_entry.data["host"]
     username = config_entry.data["username"]
     password = config_entry.data["password"]
     options = config_entry.options
 
-    input_names = DEFAULT_INPUT_NAMES.copy()
-    for i in range(1, 6):
-        key = f"input_{i}"
-        if key in options:
-            input_names[i] = options[key]
-
-    session = async_get_clientsession(hass)
-    auth = aiohttp.BasicAuth(username, password)
-
+    # Read update_interval from config entry data, default to 30 seconds
+    update_interval = timedelta(seconds=int(config_entry.data.get("update_interval", 30)))
     # Create coordinator
     coordinator = SavantDataUpdateCoordinator(
         hass,
         host,
-        auth,
-        update_interval=timedelta(seconds=5)
+        aiohttp.BasicAuth(username, password),
+        update_interval=update_interval,
+        name=f"{DOMAIN}-{config_entry.entry_id}",
     )
 
-    # Fetch device info
-    model = None
-    unique_id = None
-    firmware = None
-    ip_address = None
-    try:
-        # Model from /cgi-bin/constants
-        resp = await session.get(f"http://{host}/cgi-bin/constants", auth=auth)
-        resp.raise_for_status()
-        constants = await resp.json()
-        model = constants.get("chassis", "Unknown")
-    except Exception as e:
-        _LOGGER.warning("Could not fetch model: %s", str(e))
-        model = "Unknown"
-    try:
-        # Try to get JSON from /cgi-bin/status
-        resp = await session.get(f"http://{host}/cgi-bin/status?outputType=application/json", auth=auth)
-        if resp.status == 200:
-            status = await resp.json()
-            unique_id = status.get("savantID")
-            firmware = status.get("firmwareVersion")
-            ip_address = status.get("ipAddress")
-        else:
-            raise Exception("Not JSON")
-    except Exception:
-        # Fallback: parse HTML
-        try:
-            resp = await session.get(f"http://{host}/cgi-bin/status", auth=auth)
-            resp.raise_for_status()
-            html = await resp.text()
-            # Parse Savant ID
-            m = re.search(r'<th class="attribute-name">Savant ID</th><td class="attribute-value">([A-Fa-f0-9]+)</td>', html)
-            if m:
-                unique_id = m.group(1)
-            # Parse Firmware Version
-            m = re.search(r'<th class="attribute-name">Firmware Version</th><td class="attribute-value">([^<]+)</td>', html)
-            if m:
-                firmware = m.group(1)
-            # Parse IP Address
-            m = re.search(r'<th class="attribute-name">IP Address</th><td class="attribute-value">([^<]+)</td>', html)
-            if m:
-                ip_address = m.group(1)
-        except Exception as e:
-            _LOGGER.warning("Could not fetch or parse status: %s", str(e))
-            unique_id = host
-            firmware = None
-            ip_address = host
+    # Store coordinator in hass.data
+    if DOMAIN not in hass.data:
+        hass.data[DOMAIN] = {}
+    hass.data[DOMAIN][config_entry.entry_id] = coordinator
 
-    try:
-        # Initial data fetch
-        await coordinator.async_config_entry_first_refresh()
-        data = coordinator.data
-        
-        # Build input_names and output_names from device
-        input_names = {inp["port"]: inp.get("name", f"Input {inp['port']}") for inp in data.get("inputs", [])}
-        output_names = {out["port"]: out.get("name", f"Output {out['port']}") for out in data.get("outputs", [])}
-        # Apply user overrides if present
-        for i in range(1, 6):
-            key = f"input_{i}"
-            if key in options:
-                input_names[i] = options[key]
-        # Ensure input 0 is always 'Off'
-        if 0 not in input_names:
-            input_names[0] = "Off"
-        entities = [
-            SavantZone(
-                output, coordinator, input_names, output_names,
-                model=model, unique_id=unique_id, firmware=firmware, ip_address=ip_address
-            ) for output in data["outputs"]
-        ]
-        async_add_entities(entities)
-    except Exception as e:
-        _LOGGER.error("Failed to setup Savant IP Audio: %s", str(e))
+    # Initial data fetch
+    await coordinator.async_config_entry_first_refresh()
+    data = coordinator.data
+
+    if not data or "av" not in data:
+        _LOGGER.error("Failed to fetch initial data")
         return False
 
-class SavantZone(MediaPlayerEntity):
-    _attr_should_poll = False
-    _attr_available = True
+    # Build input_names and output_names from device
+    input_names = {inp["port"]: inp.get("id", f"Input {inp['port']}") for inp in data["av"].get("inputs", [])}
+    output_names = {out["port"]: out.get("id", f"Output {out['port']}") for out in data["av"].get("outputs", [])}
+    
+    # Apply user overrides if present
+    for i in range(1, 6):
+        key = f"input_{i}"
+        if key in options:
+            input_names[i] = options[key]
+    
+    # Ensure input 0 is always 'Off'
+    if 0 not in input_names:
+        input_names[0] = "Off"
 
-    def __init__(self, data, coordinator, input_names, output_names, model, unique_id, firmware, ip_address=None):
-        self._data = data
+    # Create entities
+    entities = [
+        SavantZone(
+            output["port"], coordinator, input_names, output_names,
+            model=data["status"].get("chassis", "Unknown"),
+            unique_id=data["status"].get("savantID", host),
+            firmware=data["status"].get("firmwareVersion"),
+            ip_address=data["status"].get("ipAddress", host)
+        ) for output in data["av"]["outputs"]
+    ]
+    async_add_entities(entities)
+
+async def async_unload_entry(hass, config_entry):
+    """Unload the Savant IP Audio integration."""
+    if DOMAIN in hass.data and config_entry.entry_id in hass.data[DOMAIN]:
+        coordinator = hass.data[DOMAIN][config_entry.entry_id]
+        await coordinator.async_shutdown()
+        del hass.data[DOMAIN][config_entry.entry_id]
+    return True
+
+class SavantZone(MediaPlayerEntity):
+    """A single Savant zone, backed by the shared coordinator."""
+
+    _attr_should_poll = False
+    _attr_supported_features = (
+        MediaPlayerEntityFeature.VOLUME_SET |
+        MediaPlayerEntityFeature.VOLUME_STEP |
+        MediaPlayerEntityFeature.VOLUME_MUTE |
+        MediaPlayerEntityFeature.SELECT_SOURCE |
+        MediaPlayerEntityFeature.TURN_ON |
+        MediaPlayerEntityFeature.TURN_OFF
+    )
+
+    def __init__(self, port, coordinator, input_names, output_names, model, unique_id, firmware, ip_address=None):
+        """Initialize the Savant zone."""
+        self._port = port
         self._coordinator = coordinator
         self._input_names = input_names
         self._output_names = output_names
-        self._name = output_names.get(data['port'], f"Savant Zone {data['port']}")
-        self._port = data["port"]
-        self._model = model
-        self._unique_id = unique_id or coordinator.host
+        # Use model from constants if available
+        self._model = None  # Will be property
+        self._unique_id = unique_id
         self._firmware = firmware
-        self._ip_address = ip_address or coordinator.host
+        self._ip_address = ip_address
+        self._remove = None
+        _LOGGER.debug("Initialized SavantZone with port %s", self._port)
+
+    async def async_added_to_hass(self):
+        """When entity is added to hass."""
+        _LOGGER.debug("Adding entity %s to hass", self.name)
+        self._remove = self._coordinator.async_add_listener(self.async_write_ha_state)
+
+    async def async_will_remove_from_hass(self):
+        """When entity will be removed from hass."""
+        if self._remove:
+            self._remove()
+
+    @property
+    def _output(self):
+        return next((o for o in self._coordinator.data["av"].get("outputs", []) if o["port"] == self._port), {})
 
     @property
     def name(self):
-        return self._name
+        # Use MAC ID (first 12 chars of unique_id) for uniqueness
+        mac_id = self._unique_id[:12] if self._unique_id else "unknown"
+        return f"Savant {mac_id} Output {self._port}"
 
     @property
     def available(self):
@@ -150,27 +135,27 @@ class SavantZone(MediaPlayerEntity):
         if not self.available:
             _LOGGER.debug("Entity %s is unavailable", self.name)
             return STATE_UNAVAILABLE
-        state = STATE_OFF if self._data["inputsrc"] == 0 else STATE_ON
-        _LOGGER.debug("Entity %s state: %s (inputsrc: %s)", self.name, state, self._data["inputsrc"])
+        state = STATE_OFF if self._output.get("inputsrc", 0) == 0 else STATE_ON
+        _LOGGER.debug("Entity %s state: %s (inputsrc: %s)", self.name, state, self._output.get("inputsrc", 0))
         return state
 
     @property
     def volume_level(self):
-        vol_db = self._data["volume"]
-        volume = max(0.0, min(1.0, (vol_db + 80) / 80))
+        vol_db = self._output.get("volume", -60)
+        volume = max(0.0, min(1.0, (vol_db + 60) / 60))
         _LOGGER.debug("Entity %s volume: %s (raw: %s)", self.name, volume, vol_db)
         return volume
 
     @property
     def is_volume_muted(self):
-        muted = self._data.get("mute", False)
+        muted = self._output.get("mute", False)
         _LOGGER.debug("Entity %s mute state: %s", self.name, muted)
         return muted
 
     @property
     def source(self):
-        source = self._input_names.get(self._data["inputsrc"], f"Source {self._data['inputsrc']}")
-        _LOGGER.debug("Entity %s source: %s (inputsrc: %s)", self.name, source, self._data["inputsrc"])
+        source = self._input_names.get(self._output.get("inputsrc", 0), f"Source {self._output.get('inputsrc', 0)}")
+        _LOGGER.debug("Entity %s source: %s (inputsrc: %s)", self.name, source, self._output.get("inputsrc", 0))
         return source
 
     @property
@@ -182,31 +167,28 @@ class SavantZone(MediaPlayerEntity):
         return "receiver"
 
     @property
-    def supported_features(self):
-        return (
-            MediaPlayerEntityFeature.VOLUME_SET |
-            MediaPlayerEntityFeature.VOLUME_MUTE |
-            MediaPlayerEntityFeature.SELECT_SOURCE |
-            MediaPlayerEntityFeature.TURN_ON |
-            MediaPlayerEntityFeature.TURN_OFF |
-            MediaPlayerEntityFeature.VOLUME_STEP
-        )
-
-    @property
     def unique_id(self):
         return f"{self._unique_id}_zone_{self._port}"
 
     @property
-    def device_info(self):
+    def model(self):
+        # Prefer model from constants, then status, then fallback
+        return (
+            self._coordinator.data.get("constants", {}).get("chassis") or
+            self._coordinator.data.get("status", {}).get("chassis") or
+            "Unknown"
+        )
+
+    @property
+    def device_info(self) -> DeviceInfo:
         info = {
             "identifiers": {(DOMAIN, self._unique_id)},
             "name": "Savant IP Audio",
             "manufacturer": "Savant",
-            "model": self._model or "Unknown",
+            "model": self.model,
             "sw_version": self._firmware,
             "configuration_url": f"http://{self._coordinator.host}/",
         }
-        # Add savant_id as a MAC address connection if it looks like a MAC
         if self._unique_id and len(self._unique_id) == 16:
             mac = ':'.join(self._unique_id[i:i+2] for i in range(0, 12, 2))
             info["connections"] = {("mac", mac)}
@@ -215,30 +197,7 @@ class SavantZone(MediaPlayerEntity):
     @property
     def extra_state_attributes(self):
         exclude_keys = {"volume", "mute", "inputsrc", "port", "id"}
-        return {k: v for k, v in self._data.items() if k not in exclude_keys}
-
-    async def async_added_to_hass(self):
-        """When entity is added to hass."""
-        _LOGGER.debug("Adding entity %s to hass", self.name)
-        self.async_on_remove(
-            self._coordinator.async_add_listener(self.async_write_ha_state)
-        )
-
-    @property
-    def available(self):
-        """Return if entity is available."""
-        available = self._coordinator.last_update_success
-        _LOGGER.debug("Entity %s availability: %s", self.name, available)
-        return available
-
-    @property
-    def state(self):
-        if not self.available:
-            _LOGGER.debug("Entity %s is unavailable", self.name)
-            return STATE_UNAVAILABLE
-        state = STATE_OFF if self._data["inputsrc"] == 0 else STATE_ON
-        _LOGGER.debug("Entity %s state: %s (inputsrc: %s)", self.name, state, self._data["inputsrc"])
-        return state
+        return {k: v for k, v in self._output.items() if k not in exclude_keys}
 
     async def async_set_volume_level(self, volume):
         """Set volume level, range 0..1."""
@@ -272,12 +231,8 @@ class SavantZone(MediaPlayerEntity):
     async def async_turn_off(self):
         """Turn the media player off."""
         _LOGGER.debug("Turning off %s", self.name)
-        # Try to find the input number for 'Off', fallback to 0
-        off_id = next((k for k, v in self._input_names.items() if v.lower() == "off"), None)
-        if off_id is not None:
-            await self._coordinator.async_set_source(self._port, off_id)
-        else:
-            await self._coordinator.async_set_source(self._port, 0)
+        # Always use input 0 to turn off
+        await self._coordinator.async_set_source(self._port, 0)
 
     async def async_volume_up(self):
         """Volume up the media player."""

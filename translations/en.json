@@ -1,0 +1,34 @@
+{
+    "config": {
+        "step": {
+            "user": {
+                "title": "Connect to Savant IP Audio",
+                "data": {
+                    "host": "Host",
+                    "username": "Username",
+                    "password": "Password"
+                }
+            }
+        },
+        "error": {
+            "cannot_connect": "Failed to connect to Savant IP Audio device"
+        },
+        "abort": {
+            "already_configured": "Device is already configured"
+        }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "title": "Savant IP Audio Options",
+                "data": {
+                    "input_1": "Input 1 Name",
+                    "input_2": "Input 2 Name",
+                    "input_3": "Input 3 Name",
+                    "input_4": "Input 4 Name",
+                    "input_5": "Input 5 Name"
+                }
+            }
+        }
+    }
+} 
