@@ -1,0 +1,11 @@
+{
+  "domain": "savant_ipaudio",
+  "name": "Savant IP Audio",
+  "version": "0.5",
+  "requirements": ["aiohttp"],
+  "codeowners": ["@you"],
+  "dependencies": [],
+  "iot_class": "local_polling",
+  "config_flow": true,
+  "icon": "mdi:music"
+}
