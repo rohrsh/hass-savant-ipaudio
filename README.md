@@ -33,7 +33,7 @@ Digital out
 
 I welcome testers with other Savant IP Audio systems. The code may fail with a different number of inputs/outpots. 
 
-Savand Audio Switches are a different beast https://github.com/akropp/savantaudio-homeassistant
+Savant Audio Switches are a different beast, see https://github.com/akropp/savantaudio-homeassistant
 
 
 ## Methods
@@ -92,4 +92,5 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 - [Home Assistant](https://www.home-assistant.io/)
 - [HACS](https://hacs.xyz/)
+- Vibes from Cursor, ChatGPT and Claude
 
