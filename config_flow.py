@@ -15,7 +15,7 @@ class SavantConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_user(self, user_input=None):
         _LOGGER.debug("Starting Savant IP Audio configuration flow")
         errors = {}
-        
+
         if user_input is not None:
             _LOGGER.debug("User input received: %s", user_input)
             try:
@@ -58,7 +58,7 @@ class SavantConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 class SavantOptionsFlow(config_entries.OptionsFlow):
     def __init__(self, config_entry):
-        self.config_entry = config_entry
+        self._config_entry = config_entry
         _LOGGER.debug("Initializing options flow for entry: %s", config_entry.entry_id)
 
     async def async_step_init(self, user_input=None):
@@ -68,22 +68,22 @@ class SavantOptionsFlow(config_entries.OptionsFlow):
             return self.async_create_entry(title="", data=user_input)
 
         # Try to get current input names from the coordinator/device
-        hass = self.config_entry.hass if hasattr(self.config_entry, 'hass') else None
+        hass = self._config_entry.hass if hasattr(self._config_entry, 'hass') else None
         input_names = {}
         if hass:
-            coordinator = hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
+            coordinator = hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id)
             if coordinator and hasattr(coordinator, 'data'):
                 av = coordinator.data.get("av", {})
                 for inp in av.get("inputs", []):
                     input_names[inp["port"]] = inp.get("id", f"Input {inp['port']}")
 
         schema = vol.Schema({
-            vol.Optional("input_1", default=self.config_entry.options.get("input_1") or input_names.get(1, "")): str,
-            vol.Optional("input_2", default=self.config_entry.options.get("input_2") or input_names.get(2, "")): str,
-            vol.Optional("input_3", default=self.config_entry.options.get("input_3") or input_names.get(3, "")): str,
-            vol.Optional("input_4", default=self.config_entry.options.get("input_4") or input_names.get(4, "")): str,
-            vol.Optional("input_5", default=self.config_entry.options.get("input_5") or input_names.get(5, "")): str,
-            vol.Optional("update_interval", default=self.config_entry.data.get("update_interval", DEFAULT_UPDATE_INTERVAL)): vol.All(int, vol.Range(min=5, max=3600)),
+            vol.Optional("input_1", default=self._config_entry.options.get("input_1") or input_names.get(1, "")): str,
+            vol.Optional("input_2", default=self._config_entry.options.get("input_2") or input_names.get(2, "")): str,
+            vol.Optional("input_3", default=self._config_entry.options.get("input_3") or input_names.get(3, "")): str,
+            vol.Optional("input_4", default=self._config_entry.options.get("input_4") or input_names.get(4, "")): str,
+            vol.Optional("input_5", default=self._config_entry.options.get("input_5") or input_names.get(5, "")): str,
+            vol.Optional("update_interval", default=self._config_entry.data.get("update_interval", DEFAULT_UPDATE_INTERVAL)): vol.All(int, vol.Range(min=5, max=3600)),
         })
 
         return self.async_show_form(
