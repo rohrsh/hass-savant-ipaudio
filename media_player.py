@@ -71,8 +71,6 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
 async def async_unload_entry(hass, config_entry):
     """Unload the Savant IP Audio integration."""
     if DOMAIN in hass.data and config_entry.entry_id in hass.data[DOMAIN]:
-        coordinator = hass.data[DOMAIN][config_entry.entry_id]
-        await coordinator.async_shutdown()
         del hass.data[DOMAIN][config_entry.entry_id]
     return True
 
