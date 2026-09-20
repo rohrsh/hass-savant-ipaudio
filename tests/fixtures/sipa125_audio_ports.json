@@ -1,0 +1,17 @@
+{
+"inputs": [
+{ "port": 1, "id": "input1", "digital": true, "trim": 0 },
+{ "port": 2, "id": "input2", "digital": true, "trim": 0 },
+{ "port": 3, "id": "input3", "digital": false, "trim": 0 },
+{ "port": 4, "id": "input4", "digital": false, "trim": 0 },
+{ "port": 5, "id": "input5", "digital": false, "trim": 0 }
+],
+"outputs": [
+{ "port": 1, "id": "output1", "mono": false, "spkmute": [false,false,false,false], "dspconfig": -1, "mute": false, "volume": -49, "inputsrc": 0, "delayleft": 84, "delayright": 84, "hpffreqleft": 0, "hpffreqright": 0, "hpfrolloffleft": 0, "hpfrolloffright": 0, "trimleft": 0, "trimright": 0 },
+{ "port": 2, "id": "output2", "mono": true, "spkmute": [false,false,false,false], "dspconfig": -1, "mute": false, "volume": -36, "inputsrc": 0, "delayleft": 88, "delayright": 88, "hpffreqleft": 255, "hpffreqright": 101, "hpfrolloffleft": 0, "hpfrolloffright": 0, "trimleft": 0, "trimright": 0 },
+{ "port": 3, "id": "output3", "mono": false, "spkmute": [false,false,false,false], "dspconfig": -1, "mute": false, "volume": -44, "inputsrc": 0, "delayleft": 88, "delayright": 88, "hpffreqleft": 12808872, "hpffreqright": 1, "hpfrolloffleft": 0, "hpfrolloffright": 16000, "trimleft": 0, "trimright": 0 },
+{ "port": 4, "id": "output4", "mono": false, "spkmute": [false,false,false,false], "dspconfig": -1, "mute": false, "volume": -23, "inputsrc": 0, "delayleft": 88, "delayright": 88, "hpffreqleft": 255, "hpffreqright": 101, "hpfrolloffleft": 0, "hpfrolloffright": 0, "trimleft": 0, "trimright": 0 },
+{ "port": 5, "id": "output5", "mono": false, "spkmute": [false,false,false,false], "dspconfig": -1, "mute": false, "volume": 0, "process": false, "inputsrc": 0, "delayleft": 78, "delayright": 78 },
+{ "port": 6, "id": "output6", "spkmute": [false,false,false,false], "dspconfig": -1, "mute": false, "volume": 0, "inputsrc": 0, "delayleft": 0, "delayright": 0 }
+]
+}

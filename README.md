@@ -1,54 +1,39 @@
 # Savant IP Audio
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
+[![maintainer](https://img.shields.io/badge/maintainer-%40rohrsh-blue.svg)](https://github.com/rohrsh)
 
-
-This is a custom integration for Home Assistant that allows you to control Savant IP Audio amps. It provides one Home Assistant media player entity for each Savant audio output zones.
+This is a custom integration for Home Assistant that allows you to control Savant IP Audio devices. It provides media player functionality for your Savant audio zones.
 
 ## Legal Disclaimer
 
 This is an **unofficial** integration for Savant IP Audio systems. This integration is not affiliated with, endorsed by, or connected to Savant Systems LLC. Use of this integration is at your own risk. Please review your Savant system's terms of service and ensure you comply with all applicable terms and conditions.
 
-This integration interfaces with the Savant system's web interface in a way that is publicly accessible and does not bypass any security measures. It does not include any Savant proprietary code or reverse-engineered protocols. It does not require any changes to your Savant blueprints. 
+This integration interfaces with the Savant system's web interface in a way that is publicly accessible and does not bypass any security measures. It does not include any Savant proprietary code or reverse-engineered protocols.
 
-<img width="824" alt="image" src="https://github.com/user-attachments/assets/cae643be-327e-4c21-9190-50becf2ed16d" />
-
-
-## What? 
-
-I built this for a Savant IP Audio 125. It is from a family of powered amps and media streamer. 
-
-https://sav-documentation.s3.amazonaws.com/Product%20Deployment%20Guides/009-1571-04%20Savant%20IP%20Audio%20Deployment%20Guide.pdf
-
-e.g. PAV-SIPA125SM]
-5x Inputs:
-2 Optical Inputs: one often used for doorbell/PA
-2 RCA Inputs 
-1 Internal Media Streamer (input 5)
-
-6x Outputs:
-4 powered zones
-Analogue out
-Digital out
-
-I welcome testers with other Savant IP Audio systems. The code may fail with a different number of inputs/outpots. 
-
-Savant Audio Switches are a different beast, see https://github.com/akropp/savantaudio-homeassistant
-
+I built this for an IP Audio 125 running 9.4.6. I welcome any testers from other Savant systems — if something doesn't look right, please attach the integration's diagnostics download (Settings → Devices & services → Savant IP Audio → ⋮ → Download diagnostics) to your issue. Credentials, host and device ID are redacted.
 
 ## Methods
 
-The Savant IP Audio server has an http interface to monitor and adjust settings. This component pulls information every 30 seconds by default.  
+The Savant IP Audio system has an internal web site to monitor and adjust settings. This integration polls its JSON every 30 seconds (configurable), and every 3 seconds for half a minute after you change something from Home Assistant.
 
-Please note that Savant hosts generally assume they are they master of the universe, so changes you make through this interface likely will not be noticed in your Savant host and app. This integration is useful if you want to use your Savant IP Audio in a standalone fashion. 
-
+Please note that Savant hosts assume they are the master at all times, so changes you make here might not be noticed in your Savant host. Frankly I built this integration so I could ditch the Savant home app.
 
 ## Features
 
-- Control Savant IP Audio zones as media players in Home Assistant
-- Source selection
-- Adjust volume
+- Each Savant output (zone) is a media player in Home Assistant
+- Turn zones on and off, adjust volume (3 dB steps) and mute
+- Source selection, with your own names for the inputs
+- Turning a zone on returns to its last used source, or to a source you pick per zone. A zone that is already on is left alone, so `media_player.turn_on` is safe to call from automations
+- Zones become unavailable when the device stops responding (after three missed polls) and recover on their own
+- DSP settings reported by the device are exposed as state attributes
+- Reconfigure (new IP address) and re-authentication without removing the integration
 
+The zones are outputs of a matrix switch, not independent players: zones listening to the same input hear the same thing. There is no play/pause or track metadata.
+
+## Requirements
+
+Home Assistant 2025.8 or newer.
 
 ## Installation
 
@@ -66,23 +51,32 @@ Please note that Savant hosts generally assume they are they master of the unive
 2. Extract the `savant_ipaudio` folder into your `custom_components` directory
 3. Restart Home Assistant
 
-## Setup
-
-1. In Home Assistant, go to **Configuration** → **Integrations**
-2. Click the **+ Add Integration** button
-3. Search for "Savant IP Audio"
-4. Enter your Savant controller's IP address, username/password 
-
-
 ## Configuration
 
-1. Outputs: Your Savant audio zones will appear as numerous media player entities in Home Assistant. You might like to rename them through the UI. 
+1. In Home Assistant, go to **Settings** → **Devices & services**
+2. Click the **+ Add integration** button
+3. Search for "Savant IP Audio"
+4. Enter your Savant device's IP address, and the username and password of its web interface (factory default `RPM` / `RPM`)
 
-2. Inputs: Press configure button on the master Savant IP Audio device to rename your inputs. Then reload the device. 
+## Usage
 
+1. Outputs: Your Savant audio zones appear as media players, named as they are on the device. You might like to rename them and assign them to areas.
 
-I tried to get access to the live metadata from the media  (it's Shairport) but I couldn't get this without disrupting the flow to the Savant app. 
+2. Options: Press **Configure** on the integration to
+   - name your inputs (clear a name to go back to the device's name),
+   - choose the source each zone turns on with (default: last used source),
+   - change the polling interval.
 
+   Changes apply immediately.
+
+I tried to get access to the live media streamer metadata (it's Shairport) but I couldn't get this without making changes to the host.
+
+## Development
+
+```bash
+pip install pytest-homeassistant-custom-component
+pytest
+```
 
 ## License
 
@@ -92,5 +86,3 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 - [Home Assistant](https://www.home-assistant.io/)
 - [HACS](https://hacs.xyz/)
-- Vibes from Cursor, ChatGPT and Claude
-
