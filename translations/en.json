@@ -7,28 +7,97 @@
                     "host": "Host",
                     "username": "Username",
                     "password": "Password"
+                },
+                "data_description": {
+                    "host": "Hostname or IP address of the Savant IP Audio device.",
+                    "username": "Username of the device's web interface. The factory default is RPM.",
+                    "password": "Password of the device's web interface. The factory default is RPM."
+                }
+            },
+            "reconfigure": {
+                "title": "Reconfigure Savant IP Audio",
+                "data": {
+                    "host": "Host",
+                    "username": "Username",
+                    "password": "Password"
+                },
+                "data_description": {
+                    "host": "Hostname or IP address of the Savant IP Audio device.",
+                    "username": "Username of the device's web interface.",
+                    "password": "Password of the device's web interface."
+                }
+            },
+            "reauth_confirm": {
+                "title": "Savant IP Audio credentials",
+                "description": "The device at {host} rejected the stored username and password.",
+                "data": {
+                    "username": "Username",
+                    "password": "Password"
                 }
             }
         },
         "error": {
-            "cannot_connect": "Failed to connect to Savant IP Audio device"
+            "cannot_connect": "Failed to connect to the Savant IP Audio device",
+            "invalid_auth": "The device rejected the username or password",
+            "unknown": "Unexpected error, check the logs for details"
         },
         "abort": {
-            "already_configured": "Device is already configured"
+            "already_configured": "Device is already configured",
+            "reauth_successful": "Credentials updated",
+            "reconfigure_successful": "Configuration updated",
+            "wrong_device": "That address belongs to a different Savant device than the one configured here"
         }
     },
     "options": {
         "step": {
             "init": {
-                "title": "Savant IP Audio Options",
+                "title": "Savant IP Audio options",
+                "menu_options": {
+                    "inputs": "Input names",
+                    "zones": "Zone turn-on sources",
+                    "polling": "Polling interval"
+                }
+            },
+            "inputs": {
+                "title": "Input names",
+                "description": "Name the inputs as they should appear in the source list. Clear a field to use the name from the device.",
                 "data": {
-                    "input_1": "Input 1 Name",
-                    "input_2": "Input 2 Name",
-                    "input_3": "Input 3 Name",
-                    "input_4": "Input 4 Name",
-                    "input_5": "Input 5 Name"
+                    "input_1": "Input 1",
+                    "input_2": "Input 2",
+                    "input_3": "Input 3",
+                    "input_4": "Input 4",
+                    "input_5": "Input 5",
+                    "input_6": "Input 6",
+                    "input_7": "Input 7",
+                    "input_8": "Input 8"
+                }
+            },
+            "zones": {
+                "title": "Zone turn-on sources",
+                "description": "The source a zone selects when it is turned on without choosing one. A zone that is already on is left alone.",
+                "data": {
+                    "zone_1_source": "Output 1",
+                    "zone_2_source": "Output 2",
+                    "zone_3_source": "Output 3",
+                    "zone_4_source": "Output 4",
+                    "zone_5_source": "Output 5",
+                    "zone_6_source": "Output 6",
+                    "zone_7_source": "Output 7",
+                    "zone_8_source": "Output 8"
+                }
+            },
+            "polling": {
+                "title": "Polling interval",
+                "data": {
+                    "update_interval": "Polling interval"
+                },
+                "data_description": {
+                    "update_interval": "How often the device is polled when idle. After a command from Home Assistant it is polled every 3 seconds for half a minute."
                 }
             }
+        },
+        "abort": {
+            "not_loaded": "The options are read from the device, which is not connected right now."
         }
     }
-} 
+}

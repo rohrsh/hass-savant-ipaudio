@@ -1,249 +1,293 @@
+"""Media player platform for Savant IP Audio."""
+
 from __future__ import annotations
-import logging
-from homeassistant.components.media_player import MediaPlayerEntity, MediaPlayerEntityFeature
-from homeassistant.components.media_player.const import MediaPlayerState
-from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNAVAILABLE
-from homeassistant.helpers.entity import DeviceInfo
-from datetime import timedelta
-from .const import DOMAIN
-from .coordinator import SavantDataUpdateCoordinator
-import aiohttp
 
-_LOGGER = logging.getLogger(__name__)
+from dataclasses import dataclass
+from typing import Any
 
-async def async_setup_entry(hass, config_entry, async_add_entities):
-    """Set up the Savant IP Audio integration."""
-    host = config_entry.data["host"]
-    username = config_entry.data["username"]
-    password = config_entry.data["password"]
-    options = config_entry.options
+from homeassistant.components.media_player import (
+    MediaPlayerDeviceClass,
+    MediaPlayerEntity,
+    MediaPlayerEntityFeature,
+    MediaPlayerState,
+)
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.helpers.device_registry import (
+    CONNECTION_NETWORK_MAC,
+    DeviceInfo,
+    format_mac,
+)
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.restore_state import ExtraStoredData, RestoreEntity
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-    # Read update_interval from config entry data, default to 30 seconds
-    update_interval = timedelta(seconds=int(config_entry.data.get("update_interval", 30)))
-    # Create coordinator
-    coordinator = SavantDataUpdateCoordinator(
-        hass,
-        host,
-        aiohttp.BasicAuth(username, password),
-        update_interval=update_interval,
-        name=f"{DOMAIN}-{config_entry.entry_id}",
-    )
+from .const import (
+    DOMAIN,
+    MAX_VOLUME_DB,
+    MIN_VOLUME_DB,
+    TURN_ON_LAST,
+    zone_source_option,
+)
+from .coordinator import (
+    SavantConfigEntry,
+    SavantDataUpdateCoordinator,
+    port_name,
+    resolve_input_names,
+)
 
-    # Store coordinator in hass.data
-    if DOMAIN not in hass.data:
-        hass.data[DOMAIN] = {}
-    hass.data[DOMAIN][config_entry.entry_id] = coordinator
+# Requests are serialized by the client, so no limit is needed here.
+PARALLEL_UPDATES = 0
 
-    # Initial data fetch
-    await coordinator.async_config_entry_first_refresh()
-    data = coordinator.data
+# Volume step size: 0.05 = 5% = 3 dB
+VOLUME_STEP = 0.05
 
-    if not data or "av" not in data:
-        _LOGGER.error("Failed to fetch initial data")
-        return False
+# Output fields exposed through standard media player properties.
+_STANDARD_OUTPUT_KEYS = {"volume", "mute", "inputsrc", "port", "id"}
 
-    # Build input_names and output_names from device
-    input_names = {inp["port"]: inp.get("id", f"Input {inp['port']}") for inp in data["av"].get("inputs", [])}
-    output_names = {out["port"]: out.get("id", f"Output {out['port']}") for out in data["av"].get("outputs", [])}
-    
-    # Apply user overrides if present
-    for i in range(1, 6):
-        key = f"input_{i}"
-        if key in options:
-            input_names[i] = options[key]
-    
-    # Ensure input 0 is always 'Off'
-    if 0 not in input_names:
-        input_names[0] = "Off"
+# The device returns uninitialised memory in the high-pass filter fields of
+# outputs that have no filter configured. Decoded little-endian the values are
+# fragments of filesystem paths ("255/", "/dat", "a/va"), and they change on
+# every command sent to that output. Publishing them as attributes writes that
+# churn into the recorder for no benefit, so keep them out; they are still in
+# the diagnostics dump for anyone who wants to look.
+# (Observed on a PAV-SIPA125, firmware 9.4:706, 2026-09-20.)
+_UNRELIABLE_OUTPUT_KEYS = {
+    "hpffreqleft",
+    "hpffreqright",
+    "hpfrolloffleft",
+    "hpfrolloffright",
+}
 
-    # Create entities
-    entities = [
+_ROUTING_FEATURES = (
+    MediaPlayerEntityFeature.SELECT_SOURCE
+    | MediaPlayerEntityFeature.TURN_ON
+    | MediaPlayerEntityFeature.TURN_OFF
+)
+_VOLUME_FEATURES = (
+    MediaPlayerEntityFeature.VOLUME_SET
+    | MediaPlayerEntityFeature.VOLUME_STEP
+    | MediaPlayerEntityFeature.VOLUME_MUTE
+)
+
+# Output 6 is the TOSLINK digital out. Savant's own specification calls it a
+# "digital optical preamp output ... fixed volume", and the hardware agrees:
+# it answers volume and mute commands with HTTP 200 and then ignores them
+# (verified on a PAV-SIPA125, firmware 9.4:706, 2026-09-20 - two different
+# volume values and a mute both had no effect). Advertising volume control
+# would give Home Assistant a slider and a mute button that silently do
+# nothing. Output 5, the analogue line out, *does* apply volume, so it keeps
+# the full feature set and only this one port is special-cased.
+#
+# Deliberately a fixed port number rather than something inferred from the
+# device payload: this is the only chassis the behaviour has been checked on,
+# and guessing wrong on another model would strip away working controls.
+_FIXED_VOLUME_PORT = 6
+
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: SavantConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up Savant IP Audio media player entities."""
+    coordinator = entry.runtime_data
+    input_names = resolve_input_names(coordinator.data, entry.options)
+
+    async_add_entities(
         SavantZone(
-            output["port"], coordinator, input_names, output_names,
-            model=data["status"].get("chassis", "Unknown"),
-            unique_id=data["status"].get("savantID", host),
-            firmware=data["status"].get("firmwareVersion"),
-            ip_address=data["status"].get("ipAddress", host)
-        ) for output in data["av"]["outputs"]
-    ]
-    async_add_entities(entities)
-
-async def async_unload_entry(hass, config_entry):
-    """Unload the Savant IP Audio integration."""
-    if DOMAIN in hass.data and config_entry.entry_id in hass.data[DOMAIN]:
-        coordinator = hass.data[DOMAIN][config_entry.entry_id]
-        await coordinator.async_shutdown()
-        del hass.data[DOMAIN][config_entry.entry_id]
-    return True
-
-class SavantZone(MediaPlayerEntity):
-    """A single Savant zone, backed by the shared coordinator."""
-
-    _attr_should_poll = False
-    _attr_supported_features = (
-        MediaPlayerEntityFeature.VOLUME_SET |
-        MediaPlayerEntityFeature.VOLUME_STEP |
-        MediaPlayerEntityFeature.VOLUME_MUTE |
-        MediaPlayerEntityFeature.SELECT_SOURCE |
-        MediaPlayerEntityFeature.TURN_ON |
-        MediaPlayerEntityFeature.TURN_OFF
+            coordinator,
+            port,
+            input_names,
+            entry.options.get(zone_source_option(port), TURN_ON_LAST),
+        )
+        for port in coordinator.data.outputs
     )
 
-    def __init__(self, port, coordinator, input_names, output_names, model, unique_id, firmware, ip_address=None):
+
+def _as_int(value: Any, default: int) -> int:
+    """Coerce a device value to int."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _device_info(coordinator: SavantDataUpdateCoordinator) -> DeviceInfo:
+    """Build the device registry entry shared by all zones."""
+    device_id = coordinator.device_id
+    info = DeviceInfo(
+        identifiers={(DOMAIN, device_id)},
+        name="Savant IP Audio",
+        manufacturer="Savant",
+        configuration_url=f"http://{coordinator.client.host}/",
+    )
+    if model := (
+        coordinator.constants.get("chassis") or coordinator.status.get("chassis")
+    ):
+        info["model"] = model
+    if firmware := coordinator.status.get("firmwareVersion"):
+        info["sw_version"] = firmware
+    # The savantID starts with the device's MAC address
+    raw = device_id[:12]
+    if len(raw) == 12 and all(c in "0123456789abcdefABCDEF" for c in raw):
+        info["connections"] = {(CONNECTION_NETWORK_MAC, format_mac(raw))}
+    return info
+
+
+@dataclass
+class SavantZoneExtraStoredData(ExtraStoredData):
+    """Zone state to keep across restarts."""
+
+    last_source: int | None
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return a dict representation of the data."""
+        return {"last_source": self.last_source}
+
+
+class SavantZone(
+    CoordinatorEntity[SavantDataUpdateCoordinator], MediaPlayerEntity, RestoreEntity
+):
+    """A single Savant output zone."""
+
+    _attr_has_entity_name = True
+    _attr_device_class = MediaPlayerDeviceClass.RECEIVER
+    _attr_volume_step = VOLUME_STEP
+    _attr_supported_features = _ROUTING_FEATURES | _VOLUME_FEATURES
+
+    def __init__(
+        self,
+        coordinator: SavantDataUpdateCoordinator,
+        port: int,
+        input_names: dict[int, str],
+        turn_on_source: str,
+    ) -> None:
         """Initialize the Savant zone."""
+        super().__init__(coordinator)
         self._port = port
-        self._coordinator = coordinator
         self._input_names = input_names
-        self._output_names = output_names
-        # Use model from constants if available
-        self._model = None  # Will be property
-        self._unique_id = unique_id
-        self._firmware = firmware
-        self._ip_address = ip_address
-        self._remove = None
-        _LOGGER.debug("Initialized SavantZone with port %s", self._port)
+        self._turn_on_source = turn_on_source
+        self._last_source: int | None = self._source_id or None
 
-    async def async_added_to_hass(self):
-        """When entity is added to hass."""
-        _LOGGER.debug("Adding entity %s to hass", self.name)
-        self._remove = self._coordinator.async_add_listener(self.async_write_ha_state)
+        if port == _FIXED_VOLUME_PORT:
+            self._attr_supported_features = _ROUTING_FEATURES
 
-    async def async_will_remove_from_hass(self):
-        """When entity will be removed from hass."""
-        if self._remove:
-            self._remove()
+        self._attr_unique_id = f"{coordinator.device_id}_zone_{port}"
+        self._attr_name = port_name(self._output, f"Output {port}")
+        self._attr_source_list = list(input_names.values())
+        self._attr_device_info = _device_info(coordinator)
 
-    @property
-    def _output(self):
-        return next((o for o in self._coordinator.data["av"].get("outputs", []) if o["port"] == self._port), {})
+    async def async_added_to_hass(self) -> None:
+        """Restore the last used source of a zone that is currently off."""
+        await super().async_added_to_hass()
+        if self._last_source is None and (
+            extra_data := await self.async_get_last_extra_data()
+        ):
+            self._last_source = (
+                _as_int(extra_data.as_dict().get("last_source"), 0) or None
+            )
 
     @property
-    def name(self):
-        # Use MAC ID (first 12 chars of unique_id) for uniqueness
-        mac_id = self._unique_id[:12] if self._unique_id else "unknown"
-        return f"Savant {mac_id} Output {self._port}"
+    def extra_restore_state_data(self) -> SavantZoneExtraStoredData:
+        """Return zone state to keep across restarts."""
+        return SavantZoneExtraStoredData(self._last_source)
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Remember the source in use, so turning on can return to it."""
+        if source_id := self._source_id:
+            self._last_source = source_id
+        super()._handle_coordinator_update()
 
     @property
-    def available(self):
-        """Return if entity is available."""
-        available = self._coordinator.last_update_success
-        _LOGGER.debug("Entity %s availability: %s", self.name, available)
-        return available
+    def _output(self) -> dict[str, Any]:
+        """Return the device data for this zone."""
+        return self.coordinator.data.outputs.get(self._port, {})
 
     @property
-    def state(self):
-        if not self.available:
-            _LOGGER.debug("Entity %s is unavailable", self.name)
-            return STATE_UNAVAILABLE
-        state = STATE_OFF if self._output.get("inputsrc", 0) == 0 else STATE_ON
-        _LOGGER.debug("Entity %s state: %s (inputsrc: %s)", self.name, state, self._output.get("inputsrc", 0))
-        return state
+    def _source_id(self) -> int:
+        """Return the input port this zone listens to, 0 when off."""
+        return _as_int(self._output.get("inputsrc"), 0)
 
     @property
-    def volume_level(self):
-        vol_db = self._output.get("volume", -60)
-        volume = max(0.0, min(1.0, (vol_db + 60) / 60))
-        _LOGGER.debug("Entity %s volume: %s (raw: %s)", self.name, volume, vol_db)
-        return volume
+    def available(self) -> bool:
+        """Return if the zone is reported by the device."""
+        return super().available and self._port in self.coordinator.data.outputs
 
     @property
-    def is_volume_muted(self):
-        muted = self._output.get("mute", False)
-        _LOGGER.debug("Entity %s mute state: %s", self.name, muted)
-        return muted
+    def state(self) -> MediaPlayerState:
+        """Return the state of the zone based on input source."""
+        return MediaPlayerState.ON if self._source_id else MediaPlayerState.OFF
 
     @property
-    def source(self):
-        source = self._input_names.get(self._output.get("inputsrc", 0), f"Source {self._output.get('inputsrc', 0)}")
-        _LOGGER.debug("Entity %s source: %s (inputsrc: %s)", self.name, source, self._output.get("inputsrc", 0))
-        return source
+    def volume_level(self) -> float:
+        """Return volume as 0.0-1.0 from the device's dB range."""
+        vol_db = _as_int(self._output.get("volume"), MIN_VOLUME_DB)
+        level = (vol_db - MIN_VOLUME_DB) / (MAX_VOLUME_DB - MIN_VOLUME_DB)
+        return max(0.0, min(1.0, level))
 
     @property
-    def source_list(self):
-        return list(self._input_names.values())
+    def is_volume_muted(self) -> bool:
+        """Return mute state."""
+        mute = self._output.get("mute", False)
+        if isinstance(mute, str):
+            return mute == "muted"
+        return bool(mute)
 
     @property
-    def device_class(self):
-        return "receiver"
+    def source(self) -> str | None:
+        """Return the current input source name, or None if off."""
+        if not (source_id := self._source_id):
+            return None
+        return self._input_names.get(source_id, f"Source {source_id}")
 
     @property
-    def unique_id(self):
-        return f"{self._unique_id}_zone_{self._port}"
-
-    @property
-    def model(self):
-        # Prefer model from constants, then status, then fallback
-        return (
-            self._coordinator.data.get("constants", {}).get("chassis") or
-            self._coordinator.data.get("status", {}).get("chassis") or
-            "Unknown"
-        )
-
-    @property
-    def device_info(self) -> DeviceInfo:
-        info = {
-            "identifiers": {(DOMAIN, self._unique_id)},
-            "name": "Savant IP Audio",
-            "manufacturer": "Savant",
-            "model": self.model,
-            "sw_version": self._firmware,
-            "configuration_url": f"http://{self._coordinator.host}/",
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Expose DSP/delay attributes that don't map to standard HA features."""
+        return {
+            key: value
+            for key, value in self._output.items()
+            if key not in _STANDARD_OUTPUT_KEYS and key not in _UNRELIABLE_OUTPUT_KEYS
         }
-        if self._unique_id and len(self._unique_id) == 16:
-            mac = ':'.join(self._unique_id[i:i+2] for i in range(0, 12, 2))
-            info["connections"] = {("mac", mac)}
-        return info
 
-    @property
-    def extra_state_attributes(self):
-        exclude_keys = {"volume", "mute", "inputsrc", "port", "id"}
-        return {k: v for k, v in self._output.items() if k not in exclude_keys}
+    # ── Commands ──────────────────────────────────────────────────────
 
-    async def async_set_volume_level(self, volume):
+    async def async_set_volume_level(self, volume: float) -> None:
         """Set volume level, range 0..1."""
-        _LOGGER.debug("Setting volume for %s to %s", self.name, volume)
-        await self._coordinator.async_set_volume(self._port, volume)
+        await self.coordinator.async_set_volume(self._port, volume)
 
-    async def async_mute_volume(self, mute):
-        """Mute the volume."""
-        _LOGGER.debug("Setting mute for %s to %s", self.name, mute)
-        await self._coordinator.async_set_mute(self._port, mute)
+    async def async_mute_volume(self, mute: bool) -> None:
+        """Mute or unmute the volume."""
+        await self.coordinator.async_set_mute(self._port, mute)
 
-    async def async_select_source(self, source):
-        """Select input source."""
-        _LOGGER.debug("Selecting source for %s: %s", self.name, source)
-        src_id = next((k for k, v in self._input_names.items() if v == source), None)
-        if src_id is not None:
-            await self._coordinator.async_set_source(self._port, src_id)
-        else:
-            _LOGGER.warning("Source %s not found for %s", source, self.name)
+    async def async_select_source(self, source: str) -> None:
+        """Select input source by name."""
+        source_id = next(
+            (port for port, name in self._input_names.items() if name == source), None
+        )
+        if source_id is None:
+            raise ServiceValidationError(
+                f"Source '{source}' is not available for {self.entity_id}; "
+                f"choose one of: {', '.join(self._input_names.values())}"
+            )
+        await self.coordinator.async_set_source(self._port, source_id)
 
-    async def async_turn_on(self):
-        """Turn the media player on."""
-        _LOGGER.debug("Turning on %s", self.name)
-        # Always select the first available input (lowest non-zero, non-off)
-        src_id = next((k for k in sorted(self._input_names) if k != 0 and self._input_names[k].lower() != "off"), None)
-        if src_id is not None:
-            await self.async_select_source(self._input_names[src_id])
-        else:
-            _LOGGER.warning("No valid input found to turn on %s", self.name)
+    async def async_turn_on(self) -> None:
+        """Turn on with the configured source, else the last used one.
 
-    async def async_turn_off(self):
-        """Turn the media player off."""
-        _LOGGER.debug("Turning off %s", self.name)
-        # Always use input 0 to turn off
-        await self._coordinator.async_set_source(self._port, 0)
+        A zone that is already on keeps playing what it is playing.
+        """
+        if self._source_id:
+            return
 
-    async def async_volume_up(self):
-        """Volume up the media player."""
-        current_volume = self.volume_level
-        new_volume = min(1.0, current_volume + 0.05)
-        _LOGGER.debug("Volume up for %s: %s -> %s", self.name, current_volume, new_volume)
-        await self.async_set_volume_level(new_volume)
+        configured = _as_int(self._turn_on_source, 0)
+        for candidate in (configured, self._last_source, *sorted(self._input_names)):
+            if candidate in self._input_names:
+                await self.coordinator.async_set_source(self._port, candidate)
+                return
+        raise HomeAssistantError(f"No input available to turn on {self.entity_id}")
 
-    async def async_volume_down(self):
-        """Volume down the media player."""
-        current_volume = self.volume_level
-        new_volume = max(0.0, current_volume - 0.05)
-        _LOGGER.debug("Volume down for %s: %s -> %s", self.name, current_volume, new_volume)
-        await self.async_set_volume_level(new_volume)
+    async def async_turn_off(self) -> None:
+        """Turn off by setting input source to 0."""
+        await self.coordinator.async_set_source(self._port, 0)
