@@ -158,19 +158,25 @@ async def test_options(hass, mock_device, config_entry) -> None:
         result["flow_id"], {"input_1": " Sonos ", "input_2": "TV"}
     )
     await hass.async_block_till_done()
-    assert config_entry.options == {"input_1": "Sonos", "input_2": "TV"}
+    assert config_entry.options == {
+        "input_1": "Sonos",
+        "input_2": "TV",
+        "optimistic_writes": False,
+    }
     state = hass.states.get("media_player.savant_ip_audio_kitchen")
     assert state.attributes["source_list"] == ["Sonos", "TV", "Aux"]
 
-    # Other steps keep it; the interval shown is the stored one
+    # Other steps keep it; the values shown are the stored ones
     result = await _options_step(hass, config_entry, "polling")
     await hass.config_entries.options.async_configure(
-        result["flow_id"], {"update_interval": 10}
+        result["flow_id"], {"update_interval": 10, "optimistic_writes": True}
     )
     await hass.async_block_till_done()
+    assert config_entry.runtime_data.optimistic_writes is True
     result = await _options_step(hass, config_entry, "polling")
-    (marker,) = result["data_schema"].schema
-    assert marker.default() == 10
+    interval, optimistic = result["data_schema"].schema
+    assert interval.default() == 10
+    assert optimistic.default() is True
     hass.config_entries.options.async_abort(result["flow_id"])
 
     result = await _options_step(hass, config_entry, "zones")
@@ -187,6 +193,7 @@ async def test_options(hass, mock_device, config_entry) -> None:
     await hass.async_block_till_done()
     assert config_entry.options == {
         "input_2": "TV",
+        "optimistic_writes": True,
         "update_interval": 10,
         "zone_1_source": "2",
         "zone_2_source": "last",

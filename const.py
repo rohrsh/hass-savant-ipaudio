@@ -3,12 +3,17 @@
 DOMAIN = "savant_ipaudio"
 
 CONF_UPDATE_INTERVAL = "update_interval"
+CONF_OPTIMISTIC_WRITES = "optimistic_writes"
 
 DEFAULT_USERNAME = "RPM"
 DEFAULT_PASSWORD = "RPM"
 DEFAULT_UPDATE_INTERVAL = 30
 MIN_UPDATE_INTERVAL = 5
 MAX_UPDATE_INTERVAL = 3600
+
+# Return from commands as soon as they are queued, batching near-simultaneous
+# changes into one request, instead of waiting for the device's slow reply.
+DEFAULT_OPTIMISTIC_WRITES = True
 
 # Turn-on behaviour for a zone: restore the last used source, or a fixed input.
 TURN_ON_LAST = "last"

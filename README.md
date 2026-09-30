@@ -26,6 +26,7 @@ Please note that Savant hosts assume they are the master at all times, so change
 - Source selection, with your own names for the inputs
 - Turning a zone on returns to its last used source, or to a source you pick per zone. A zone that is already on is left alone, so `media_player.turn_on` is safe to call from automations
 - Zones become unavailable when the device stops responding (after three missed polls) and recover on their own, with polling slowing down (up to every 5 minutes) while the device is offline
+- Fast commands (default): changes return straight away and changes made together, such as a script routing several zones, are sent as one request. The device applies a change within about 0.1 s but takes about a second to acknowledge each request, which otherwise adds up quickly (three zones times source plus volume is six seconds)
 - DSP settings reported by the device are exposed as state attributes
 - Reconfigure (new IP address) and re-authentication without removing the integration
 
@@ -69,7 +70,7 @@ Home Assistant 2025.8 or newer.
 2. Options: Press **Configure** on the integration to
    - name your inputs (clear a name to go back to the device's name),
    - choose the source each zone turns on with (default: last used source),
-   - change the polling interval.
+   - change the polling interval, and turn fast commands off if you would rather each change wait for the device to acknowledge it (a failed change is then reported as an error to the script or automation that made it; with fast commands it is logged and the zone shows its real state again).
 
    Changes apply immediately.
 

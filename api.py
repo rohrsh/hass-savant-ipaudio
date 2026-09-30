@@ -80,9 +80,21 @@ class SavantClient:
         self._lock = asyncio.Lock()
 
     async def _request(
-        self, method: str, path: str, *, data: dict[str, str] | None = None
+        self,
+        method: str,
+        path: str,
+        *,
+        data: dict[str, str] | None = None,
+        exclusive: bool = True,
     ) -> Any:
-        """Send a request, returning decoded JSON for GETs."""
+        """Send a request, returning decoded JSON for GETs.
+
+        Exclusive requests queue behind one another. A non-exclusive request
+        skips the queue; the caller is then responsible for limiting how many
+        are in flight.
+        """
+        if not exclusive:
+            return await self._send(method, path, data)
         try:
             async with asyncio.timeout(_QUEUE_TIMEOUT):
                 await self._lock.acquire()
@@ -90,6 +102,15 @@ class SavantClient:
             raise SavantConnectionError(
                 f"{self.host} is busy; request not sent within {_QUEUE_TIMEOUT}s"
             ) from err
+        try:
+            return await self._send(method, path, data)
+        finally:
+            self._lock.release()
+
+    async def _send(
+        self, method: str, path: str, data: dict[str, str] | None
+    ) -> Any:
+        """Perform one HTTP request against the device."""
         try:
             async with self._session.request(
                 method,
@@ -113,8 +134,6 @@ class SavantClient:
             raise SavantConnectionError(
                 f"Invalid response from {self.host}: {err}"
             ) from err
-        finally:
-            self._lock.release()
 
     async def _get_dict(self, path: str) -> dict[str, Any]:
         """GET an endpoint that is expected to return a JSON object."""
@@ -145,6 +164,14 @@ class SavantClient:
         """Return device constants (model/chassis)."""
         return await self._get_dict(_CONSTANTS_PATH)
 
-    async def async_set_audio(self, params: dict[str, str]) -> None:
-        """Set one or more audio parameters, e.g. {"output1.volume": "-20"}."""
-        await self._request("POST", _SET_AUDIO_PATH, data=params)
+    async def async_set_audio(
+        self, params: dict[str, str], *, exclusive: bool = True
+    ) -> None:
+        """Set one or more audio parameters, e.g. {"output1.volume": "-20"}.
+
+        The device applies a write within about 0.1 s but only answers about a
+        second later, and it accepts overlapping writes. Pass exclusive=False
+        to send without queueing behind other requests.
+        (Measured on a PAV-SIPA125, firmware 9.4:706, 2026-09-30.)
+        """
+        await self._request("POST", _SET_AUDIO_PATH, data=params, exclusive=exclusive)

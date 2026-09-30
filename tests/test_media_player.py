@@ -30,6 +30,7 @@ from homeassistant.helpers import entity_registry as er
 
 from conftest import (
     AUDIO_URL,
+    CONFIRMED_WRITES,
     CONSTANTS_URL,
     ENTRY_DATA,
     SAVANT_ID,
@@ -110,7 +111,7 @@ async def test_turn_on_uses_configured_source(hass, mock_device) -> None:
         domain=DOMAIN,
         data=ENTRY_DATA,
         unique_id=SAVANT_ID,
-        options={"zone_1_source": "3", "input_3": "Turntable"},
+        options={"zone_1_source": "3", "input_3": "Turntable", **CONFIRMED_WRITES},
     )
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
@@ -464,3 +465,135 @@ async def test_uninitialised_filter_fields_are_not_published(hass, sipa125) -> N
     assert not [key for key in attributes if key.startswith("hpf")]
     # Neighbouring DSP fields are still exposed.
     assert attributes["delayleft"] == 88
+
+
+# --- Fast (optimistic) commands: the default -------------------------------
+
+
+@pytest.fixture
+async def fast_entry(hass: HomeAssistant, mock_device, optimistic_entry):
+    """Set up the integration with default options (fast commands on)."""
+    assert await hass.config_entries.async_setup(optimistic_entry.entry_id)
+    await hass.async_block_till_done()
+    yield optimistic_entry
+    if optimistic_entry.state is ConfigEntryState.LOADED:
+        await hass.config_entries.async_unload(optimistic_entry.entry_id)
+        await hass.async_block_till_done()
+
+
+class _SlowDevice:
+    """Stand-in for SavantClient.async_set_audio that answers when released."""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.sent: list[dict] = []
+        self.exclusive: list[bool] = []
+        self.release = asyncio.Event()
+        self.error = error
+
+    async def __call__(self, params: dict, *, exclusive: bool = True) -> None:
+        self.sent.append(params)
+        self.exclusive.append(exclusive)
+        await self.release.wait()
+        if self.error is not None:
+            raise self.error
+
+
+_WINDOW = 0.01
+
+
+async def _past_window() -> None:
+    await asyncio.sleep(_WINDOW * 4)
+
+
+async def test_fast_commands_return_at_once_and_are_batched(hass, fast_entry) -> None:
+    """A script routing several zones sends one request, and doesn't wait for it."""
+    device = _SlowDevice()
+    with (
+        patch.object(fast_entry.runtime_data.client, "async_set_audio", device),
+        patch.object(coordinator_module, "_WRITE_BATCH_WINDOW", _WINDOW),
+    ):
+        # Returns although the device never answers
+        await _call(hass, "select_source", [KITCHEN, LOUNGE], source="Aux")
+        await _call(hass, "volume_set", [KITCHEN, LOUNGE], volume_level=0.25)
+        assert hass.states.get(LOUNGE).attributes["source"] == "Aux"
+        assert hass.states.get(KITCHEN).attributes["volume_level"] == pytest.approx(0.25)
+
+        await _past_window()
+        assert device.sent == [
+            {
+                "output1.inputsrc": "3",
+                "output2.inputsrc": "3",
+                "output1.volume": "-45",
+                "output2.volume": "-45",
+            }
+        ]
+        assert device.exclusive == [False]
+        device.release.set()
+        await _settle()
+
+
+async def test_fast_command_failure_is_logged_and_rolled_back(
+    hass, fast_entry, caplog
+) -> None:
+    """Nobody waits on the request, so a failure is logged, not raised."""
+    device = _SlowDevice(error=SavantConnectionError("dropped"))
+    device.release.set()
+    with (
+        patch.object(fast_entry.runtime_data.client, "async_set_audio", device),
+        patch.object(coordinator_module, "_WRITE_BATCH_WINDOW", _WINDOW),
+        caplog.at_level(logging.WARNING),
+    ):
+        await _call(hass, "select_source", LOUNGE, source="Aux")
+        assert hass.states.get(LOUNGE).attributes["source"] == "Aux"
+        await _past_window()
+        await _settle()
+
+    assert hass.states.get(LOUNGE).attributes["source"] == "TV"
+    assert "Could not set output2.inputsrc: dropped" in caplog.text
+
+
+async def test_fast_commands_to_a_busy_device_send_one_more_batch(
+    hass, fast_entry
+) -> None:
+    """A slider drag while earlier requests await their slow answers.
+
+    Two requests may be in flight; everything after joins the next batch, so
+    only the latest value is sent once a slot frees up.
+    """
+    device = _SlowDevice()
+    coordinator = fast_entry.runtime_data
+    with (
+        patch.object(coordinator.client, "async_set_audio", device),
+        patch.object(coordinator_module, "_WRITE_BATCH_WINDOW", _WINDOW),
+    ):
+        for level in (0.1, 0.2, 0.3, 0.4, 0.5):
+            await coordinator.async_set_volume(2, level)
+            await _past_window()
+        assert device.sent == [{"output2.volume": "-54"}, {"output2.volume": "-48"}]
+
+        device.release.set()
+        await _past_window()
+        await _settle()
+
+    assert device.sent[2:] == [{"output2.volume": "-30"}]
+    assert hass.states.get(LOUNGE).attributes["volume_level"] == pytest.approx(0.5)
+
+
+async def test_poll_during_a_fast_command_keeps_the_new_value(
+    hass, fast_entry
+) -> None:
+    """The mocked device still reports the old volume while the write is out."""
+    device = _SlowDevice()
+    coordinator = fast_entry.runtime_data
+    with (
+        patch.object(coordinator.client, "async_set_audio", device),
+        patch.object(coordinator_module, "_WRITE_BATCH_WINDOW", _WINDOW),
+        patch.object(coordinator_module, "_COMMAND_SETTLE_TIME", 0),
+    ):
+        await _call(hass, "volume_set", LOUNGE, volume_level=0.5)
+        await _past_window()
+        assert device.sent  # in flight, unanswered
+        await coordinator.async_refresh()
+        assert hass.states.get(LOUNGE).attributes["volume_level"] == pytest.approx(0.5)
+        device.release.set()
+        await _settle()

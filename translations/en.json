@@ -56,7 +56,7 @@
                 "menu_options": {
                     "inputs": "Input names",
                     "zones": "Zone turn-on sources",
-                    "polling": "Polling interval"
+                    "polling": "Polling and responsiveness"
                 }
             },
             "inputs": {
@@ -88,12 +88,14 @@
                 }
             },
             "polling": {
-                "title": "Polling interval",
+                "title": "Polling and responsiveness",
                 "data": {
-                    "update_interval": "Polling interval"
+                    "update_interval": "Polling interval",
+                    "optimistic_writes": "Fast commands"
                 },
                 "data_description": {
-                    "update_interval": "How often the device is polled when idle. After a command from Home Assistant it is polled every 3 seconds for half a minute."
+                    "update_interval": "How often the device is polled when idle. After a command from Home Assistant it is polled every 3 seconds for half a minute.",
+                    "optimistic_writes": "Return from commands straight away and send changes made together as one request. The device takes about a second to acknowledge each request; with this off, every change waits for that, and a failed change is reported as an error to the caller. With it on, a failed change is logged and the zone shows its real state again."
                 }
             }
         },

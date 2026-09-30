@@ -18,6 +18,7 @@ from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
+    BooleanSelector,
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
@@ -32,7 +33,9 @@ from homeassistant.helpers.selector import (
 
 from .api import SavantAuthError, SavantClient, SavantConnectionError
 from .const import (
+    CONF_OPTIMISTIC_WRITES,
     CONF_UPDATE_INTERVAL,
+    DEFAULT_OPTIMISTIC_WRITES,
     DEFAULT_PASSWORD,
     DEFAULT_UPDATE_INTERVAL,
     DEFAULT_USERNAME,
@@ -261,12 +264,13 @@ class SavantOptionsFlow(OptionsFlowWithReload):
     async def async_step_polling(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Set the polling interval."""
+        """Set the polling interval and how commands are sent."""
         if user_input is not None:
             return self.async_create_entry(
                 data={
                     **self.config_entry.options,
                     CONF_UPDATE_INTERVAL: int(user_input[CONF_UPDATE_INTERVAL]),
+                    CONF_OPTIMISTIC_WRITES: bool(user_input[CONF_OPTIMISTIC_WRITES]),
                 }
             )
 
@@ -288,6 +292,12 @@ class SavantOptionsFlow(OptionsFlowWithReload):
                         mode=NumberSelectorMode.BOX,
                     )
                 ),
+                vol.Required(
+                    CONF_OPTIMISTIC_WRITES,
+                    default=entry.options.get(
+                        CONF_OPTIMISTIC_WRITES, DEFAULT_OPTIMISTIC_WRITES
+                    ),
+                ): BooleanSelector(),
             }
         )
         return self.async_show_form(step_id="polling", data_schema=schema)

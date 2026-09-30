@@ -27,7 +27,10 @@ from pytest_homeassistant_custom_component.common import (  # noqa: E402
     MockConfigEntry,
 )
 
-from custom_components.savant_ipaudio.const import DOMAIN  # noqa: E402
+from custom_components.savant_ipaudio.const import (  # noqa: E402
+    CONF_OPTIMISTIC_WRITES,
+    DOMAIN,
+)
 
 HOST = "192.0.2.10"
 SAVANT_ID = "001122AABBCC0000"
@@ -81,9 +84,29 @@ def mock_device(aioclient_mock):
     return aioclient_mock
 
 
+# Most tests check that each command reaches the device and that failures are
+# reported to the caller, i.e. the behaviour with optimistic writes turned off.
+# Tests of the optimistic default use the optimistic_entry fixture.
+CONFIRMED_WRITES = {CONF_OPTIMISTIC_WRITES: False}
+
+
 @pytest.fixture
 def config_entry(hass):
-    """Return a config entry added to hass."""
+    """Return a config entry added to hass, with commands confirmed."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data=ENTRY_DATA,
+        options=CONFIRMED_WRITES,
+        unique_id=SAVANT_ID,
+        title="Savant IP Audio",
+    )
+    entry.add_to_hass(hass)
+    return entry
+
+
+@pytest.fixture
+def optimistic_entry(hass):
+    """Return a config entry added to hass, with default (optimistic) options."""
     entry = MockConfigEntry(
         domain=DOMAIN, data=ENTRY_DATA, unique_id=SAVANT_ID, title="Savant IP Audio"
     )

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
@@ -23,7 +23,9 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .api import SavantAuthError, SavantClient, SavantConnectionError, SavantError
 from .const import (
+    CONF_OPTIMISTIC_WRITES,
     CONF_UPDATE_INTERVAL,
+    DEFAULT_OPTIMISTIC_WRITES,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
     MAX_VOLUME_DB,
@@ -48,6 +50,15 @@ _REFRESH_COOLDOWN = 1.5
 # A poll that started before a command had settled may carry the old value.
 # Keep the optimistic state for that output rather than bouncing the UI.
 _COMMAND_SETTLE_TIME = 0.5
+
+# With optimistic writes, commands arriving within this window go out as one
+# request. Long enough to catch the calls of one script step or of a service
+# call on several zones, short enough not to be noticed.
+_WRITE_BATCH_WINDOW = 0.05
+
+# The device applies overlapping writes promptly; allow a couple in flight so a
+# write waiting for its slow reply doesn't hold up the next one.
+_MAX_WRITES_IN_FLIGHT = 2
 
 # Ride out this many consecutive failed polls before marking zones unavailable,
 # so a single dropped request doesn't make entities flicker.
@@ -171,6 +182,16 @@ class SavantDataUpdateCoordinator(DataUpdateCoordinator[SavantData]):
         self._confirmed: dict[int, dict[str, Any]] = {}
         # Accepted commands awaiting read-back: value and when it was sent.
         self._expected: dict[tuple[int, str], tuple[Any, float]] = {}
+        # Optimistic writes: the next batch, keyed by (port, param) so a newer
+        # value replaces an older one, holding (device value, value, generation).
+        self.optimistic_writes: bool = entry.options.get(
+            CONF_OPTIMISTIC_WRITES, DEFAULT_OPTIMISTIC_WRITES
+        )
+        self._pending: dict[tuple[int, str], tuple[str, Any, int]] = {}
+        self._flush_task: asyncio.Task[None] | None = None
+        self._write_slots = asyncio.Semaphore(_MAX_WRITES_IN_FLIGHT)
+        # Outputs with a batched write sent but not yet answered.
+        self._in_flight: Counter[int] = Counter()
 
     @property
     def device_id(self) -> str:
@@ -226,11 +247,15 @@ class SavantDataUpdateCoordinator(DataUpdateCoordinator[SavantData]):
             self._async_set_interval()
         polled = _by_port(av_data.get("outputs"))
         outputs = dict(polled)
+        pending_ports = {port for port, _ in self._pending}
         for port, output in polled.items():
             commanded_at = self._last_command.get(port)
-            if (
+            unsettled = (
                 commanded_at is not None
                 and started < commanded_at + _COMMAND_SETTLE_TIME
+            ) or port in pending_ports or self._in_flight[port] > 0
+            if (
+                unsettled
                 and self.data is not None
                 and port in self.data.outputs
             ):
@@ -296,6 +321,10 @@ class SavantDataUpdateCoordinator(DataUpdateCoordinator[SavantData]):
         generation = self._generation[key] = self._generation.get(key, 0) + 1
         self._async_update_output(port, {param: value})
 
+        if self.optimistic_writes:
+            self._queue_write(key, device_value, value, generation)
+            return
+
         async with self._param_locks[key]:
             if self._generation[key] != generation:
                 return
@@ -320,6 +349,70 @@ class SavantDataUpdateCoordinator(DataUpdateCoordinator[SavantData]):
             self._confirmed.setdefault(port, {})[param] = value
             self._expected[key] = (value, self._last_command[port])
 
+        self._activate_fast_polling()
+        await self.async_request_refresh()
+
+    @callback
+    def _queue_write(
+        self, key: tuple[int, str], device_value: str, value: Any, generation: int
+    ) -> None:
+        """Add a command to the next batch; the caller does not wait for it."""
+        self._pending[key] = (device_value, value, generation)
+        self._last_command[key[0]] = monotonic()
+        if self._flush_task is None:
+            self._flush_task = self.config_entry.async_create_background_task(
+                self.hass, self._async_flush_writes(), f"{DOMAIN} write batch"
+            )
+
+    async def _async_flush_writes(self) -> None:
+        """Send the pending commands as one request once a slot is free.
+
+        Until the batch is taken, commands keep joining it, so a slider drag
+        against a busy device sends one more request rather than every step.
+        """
+        await asyncio.sleep(_WRITE_BATCH_WINDOW)
+        async with self._write_slots:
+            batch, self._pending = self._pending, {}
+            self._flush_task = None
+            await self._async_send_batch(batch)
+
+    async def _async_send_batch(
+        self, batch: dict[tuple[int, str], tuple[str, Any, int]]
+    ) -> None:
+        """Send a batch of commands, rolling back and logging on failure.
+
+        Nobody is waiting on the result, so a failure is logged and the
+        affected zones fall back to their last confirmed values.
+        """
+        params = {
+            f"output{port}.{param}": device_value
+            for (port, param), (device_value, _, _) in batch.items()
+        }
+        ports = {port for port, _ in batch}
+        self._in_flight.update(ports)
+        try:
+            await self.client.async_set_audio(params, exclusive=False)
+        except SavantError as err:
+            for key, (_, _, generation) in batch.items():
+                port, param = key
+                # A newer command for this param owns the displayed value now.
+                if self._generation.get(key) == generation and param in (
+                    confirmed := self._confirmed.get(port, {})
+                ):
+                    self._async_update_output(port, {param: confirmed[param]})
+            if isinstance(err, SavantAuthError):
+                self.config_entry.async_start_reauth(self.hass)
+            _LOGGER.warning("Could not set %s: %s", ", ".join(params), err)
+            return
+        finally:
+            self._in_flight.subtract(ports)
+            sent_at = monotonic()
+            for port in ports:
+                self._last_command[port] = sent_at
+
+        for (port, param), (_, value, _) in batch.items():
+            self._confirmed.setdefault(port, {})[param] = value
+            self._expected[(port, param)] = (value, sent_at)
         self._activate_fast_polling()
         await self.async_request_refresh()
 
