@@ -11,7 +11,7 @@ This is an **unofficial** integration for Savant IP Audio systems. This integrat
 
 This integration interfaces with the Savant system's web interface in a way that is publicly accessible and does not bypass any security measures. It does not include any Savant proprietary code or reverse-engineered protocols.
 
-I built this for an IP Audio 125 running 9.4.6. I welcome any testers from other Savant systems — if something doesn't look right, please attach the integration's diagnostics download (Settings → Devices & services → Savant IP Audio → ⋮ → Download diagnostics) to your issue. Credentials, host and device ID are redacted.
+I built this for an IP Audio 125 running 9.4.6. I welcome any testers from other Savant systems — if something doesn't look right, please attach the integration's diagnostics download (Settings → Devices & services → Savant IP Audio → ⋮ → Download diagnostics) to your issue. Credentials, host and device ID are redacted; your zone and input names are included.
 
 ## Methods
 
@@ -25,11 +25,15 @@ Please note that Savant hosts assume they are the master at all times, so change
 - Turn zones on and off, adjust volume (3 dB steps) and mute
 - Source selection, with your own names for the inputs
 - Turning a zone on returns to its last used source, or to a source you pick per zone. A zone that is already on is left alone, so `media_player.turn_on` is safe to call from automations
-- Zones become unavailable when the device stops responding (after three missed polls) and recover on their own
+- Zones become unavailable when the device stops responding (after three missed polls) and recover on their own, with polling slowing down (up to every 5 minutes) while the device is offline
 - DSP settings reported by the device are exposed as state attributes
 - Reconfigure (new IP address) and re-authentication without removing the integration
 
 The zones are outputs of a matrix switch, not independent players: zones listening to the same input hear the same thing. There is no play/pause or track metadata.
+
+## Security
+
+The device's web interface only speaks plain HTTP, so the username and password are sent unencrypted with every request - Savant's own deployment guide says as much. Change the factory `RPM` / `RPM` credentials, and keep the device on a network segment that only trusted hosts (such as Home Assistant) can reach.
 
 ## Requirements
 

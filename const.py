@@ -17,6 +17,17 @@ TURN_ON_LAST = "last"
 MIN_VOLUME_DB = -60
 MAX_VOLUME_DB = 0
 
+# The device returns uninitialised memory in the high-pass filter fields of
+# outputs that have no filter configured. Decoded little-endian the values are
+# fragments of filesystem paths ("255/", "/dat", "a/va"), and they change on
+# every command sent to that output. They are neither published as attributes
+# nor included in diagnostics: stray memory is not something to ask users to
+# attach to a public issue.
+# (Observed on a PAV-SIPA125, firmware 9.4:706, 2026-09-20.)
+UNRELIABLE_OUTPUT_KEYS = frozenset(
+    {"hpffreqleft", "hpffreqright", "hpfrolloffleft", "hpfrolloffright"}
+)
+
 
 def input_name_option(port: int) -> str:
     """Return the options key holding the name override for an input."""

@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+from datetime import timedelta
 import json
+import logging
 from pathlib import Path
+from unittest.mock import patch
 
 from aiohttp import ClientError
 import pytest
@@ -12,6 +16,8 @@ from pytest_homeassistant_custom_component.common import (
     mock_restore_cache_with_extra_data,
 )
 
+from custom_components.savant_ipaudio import coordinator as coordinator_module
+from custom_components.savant_ipaudio.api import SavantConnectionError
 from custom_components.savant_ipaudio.const import DOMAIN
 from custom_components.savant_ipaudio.diagnostics import (
     async_get_config_entry_diagnostics,
@@ -156,6 +162,117 @@ async def test_failed_command_rolls_back(hass, loaded_entry, mock_device) -> Non
     assert hass.states.get(LOUNGE).attributes["source"] == "TV"
 
 
+async def _settle() -> None:
+    """Let queued tasks run up to their next real wait."""
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+
+async def test_rapid_volume_changes_are_coalesced(hass, loaded_entry) -> None:
+    """A slider drag against a slow device sends the value in flight and the
+    latest one, not every step in between."""
+    coordinator = loaded_entry.runtime_data
+    release = asyncio.Event()
+    sent: list[dict] = []
+
+    async def slow_set_audio(params: dict) -> None:
+        sent.append(params)
+        await release.wait()
+
+    with patch.object(coordinator.client, "async_set_audio", slow_set_audio):
+        tasks = []
+        for level in (0.1, 0.2, 0.3, 0.4, 0.5):
+            tasks.append(hass.async_create_task(coordinator.async_set_volume(2, level)))
+            await _settle()
+        assert hass.states.get(LOUNGE).attributes["volume_level"] == pytest.approx(0.5)
+        release.set()
+        await asyncio.gather(*tasks)
+
+    assert sent == [{"output2.volume": "-54"}, {"output2.volume": "-30"}]
+    assert hass.states.get(LOUNGE).attributes["volume_level"] == pytest.approx(0.5)
+
+
+async def test_failure_does_not_undo_a_newer_command(hass, loaded_entry) -> None:
+    """An older command failing must not roll back a newer one's value."""
+    coordinator = loaded_entry.runtime_data
+    release = asyncio.Event()
+    sent: list[dict] = []
+
+    async def set_audio(params: dict) -> None:
+        sent.append(params)
+        if len(sent) == 1:
+            await release.wait()
+            raise SavantConnectionError("dropped")
+
+    with patch.object(coordinator.client, "async_set_audio", set_audio):
+        older = hass.async_create_task(coordinator.async_set_volume(2, 0.1))
+        await _settle()
+        newer = hass.async_create_task(coordinator.async_set_volume(2, 0.5))
+        await _settle()
+        release.set()
+        with pytest.raises(HomeAssistantError):
+            await older
+        await newer
+
+    assert sent == [{"output2.volume": "-54"}, {"output2.volume": "-30"}]
+    assert hass.states.get(LOUNGE).attributes["volume_level"] == pytest.approx(0.5)
+
+
+async def test_ignored_command_is_logged_and_corrected(
+    hass, loaded_entry, mock_device, caplog
+) -> None:
+    """HTTP 200 is not proof: the next poll shows what the device really did."""
+    coordinator = loaded_entry.runtime_data
+    with patch.object(coordinator_module, "_COMMAND_SETTLE_TIME", 0):
+        await _call(hass, "volume_set", LOUNGE, volume_level=0.5)
+        with caplog.at_level(logging.WARNING):
+            await coordinator.async_refresh()
+
+    # The mocked device still reports -20 dB
+    assert hass.states.get(LOUNGE).attributes["volume_level"] == pytest.approx(40 / 60)
+    assert "Output 2 accepted volume=-30 but reports -20" in caplog.text
+
+
+async def test_incomplete_poll_keeps_last_good_state(
+    hass, loaded_entry, mock_device
+) -> None:
+    """An output without its routing would read as off; don't believe it."""
+    payload = audio_ports()
+    del payload["outputs"][1]["inputsrc"]
+    mock_device.clear_requests()
+    mock_device.get(AUDIO_URL, json=payload)
+
+    await loaded_entry.runtime_data.async_refresh()
+    lounge = hass.states.get(LOUNGE)
+    assert lounge.state == "on"
+    assert lounge.attributes["source"] == "TV"
+
+
+async def test_polling_backs_off_while_offline(hass, loaded_entry, mock_device) -> None:
+    coordinator = loaded_entry.runtime_data
+    normal = timedelta(seconds=30)
+    mock_device.clear_requests()
+    mock_device.get(AUDIO_URL, exc=ClientError("down"))
+
+    intervals = []
+    for _ in range(6):
+        await coordinator.async_refresh()
+        intervals.append(coordinator.update_interval)
+    assert intervals == [
+        normal,
+        normal,
+        2 * normal,
+        4 * normal,
+        8 * normal,
+        10 * normal,
+    ]
+
+    mock_device.clear_requests()
+    mock_device.get(AUDIO_URL, json=audio_ports())
+    await coordinator.async_refresh()
+    assert coordinator.update_interval == normal
+
+
 async def test_unavailable_after_repeated_poll_failures(
     hass, loaded_entry, mock_device
 ) -> None:
@@ -246,6 +363,14 @@ async def test_diagnostics_redacts_secrets(hass, loaded_entry) -> None:
     assert [out["id"] for out in result["outputs"]] == ["Kitchen", "Lounge"]
 
 
+async def test_diagnostics_leave_out_stray_device_memory(hass, sipa125) -> None:
+    result = await async_get_config_entry_diagnostics(hass, sipa125)
+    assert not [
+        key for out in result["outputs"] for key in out if key.startswith("hpf")
+    ]
+    assert result["outputs"][0]["delayleft"] == 84
+
+
 def _sipa125_zone(port: int) -> str:
     return f"media_player.savant_ip_audio_output_{port}"
 
@@ -314,6 +439,23 @@ async def test_optical_output_refuses_volume_commands(hass, sipa125) -> None:
         await _call(hass, "volume_set", _sipa125_zone(6), volume_level=0.5)
     with pytest.raises(HomeAssistantError):
         await _call(hass, "volume_mute", _sipa125_zone(6), is_volume_muted=True)
+
+
+async def test_other_models_keep_volume_on_output_6(
+    hass, aioclient_mock, config_entry
+) -> None:
+    """The optical-out special case is only known to hold for the SIPA125."""
+    payload = json.loads(
+        (Path(__file__).parent / "fixtures" / "sipa125_audio_ports.json").read_text()
+    )
+    aioclient_mock.get(AUDIO_URL, json=payload)
+    aioclient_mock.get(STATUS_URL, json={"savantID": SAVANT_ID})
+    aioclient_mock.get(CONSTANTS_URL, json={"chassis": "PAV-SIPA50"})
+    assert await hass.config_entries.async_setup(config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert MediaPlayerEntityFeature.VOLUME_SET in _features(hass, 6)
+    await hass.config_entries.async_unload(config_entry.entry_id)
 
 
 async def test_uninitialised_filter_fields_are_not_published(hass, sipa125) -> None:

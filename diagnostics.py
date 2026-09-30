@@ -8,6 +8,7 @@ from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import HomeAssistant
 
+from .const import UNRELIABLE_OUTPUT_KEYS
 from .coordinator import SavantConfigEntry
 
 # The savantID contains the MAC address of the device
@@ -24,5 +25,8 @@ async def async_get_config_entry_diagnostics(
         "status": async_redact_data(coordinator.status, _TO_REDACT),
         "constants": async_redact_data(coordinator.constants, _TO_REDACT),
         "inputs": list(coordinator.data.inputs.values()),
-        "outputs": list(coordinator.data.outputs.values()),
+        "outputs": [
+            {k: v for k, v in output.items() if k not in UNRELIABLE_OUTPUT_KEYS}
+            for output in coordinator.data.outputs.values()
+        ],
     }

@@ -125,10 +125,15 @@ class SavantConfigFlow(ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             savant_id = await self._async_validate(user_input, errors)
-            if not errors:
-                if savant_id and entry.unique_id:
+            if not errors and entry.unique_id:
+                if savant_id:
                     await self.async_set_unique_id(savant_id)
                     self._abort_if_unique_id_mismatch(reason="wrong_device")
+                elif user_input[CONF_HOST] != entry.data[CONF_HOST]:
+                    # Don't point the entry at an address that can't be shown
+                    # to belong to the same device.
+                    errors["base"] = "cannot_identify"
+            if not errors:
                 return self.async_update_reload_and_abort(
                     entry, data_updates=user_input
                 )

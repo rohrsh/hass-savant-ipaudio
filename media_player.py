@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any
 
 from homeassistant.components.media_player import (
@@ -27,6 +28,7 @@ from .const import (
     MAX_VOLUME_DB,
     MIN_VOLUME_DB,
     TURN_ON_LAST,
+    UNRELIABLE_OUTPUT_KEYS,
     zone_source_option,
 )
 from .coordinator import (
@@ -44,20 +46,6 @@ VOLUME_STEP = 0.05
 
 # Output fields exposed through standard media player properties.
 _STANDARD_OUTPUT_KEYS = {"volume", "mute", "inputsrc", "port", "id"}
-
-# The device returns uninitialised memory in the high-pass filter fields of
-# outputs that have no filter configured. Decoded little-endian the values are
-# fragments of filesystem paths ("255/", "/dat", "a/va"), and they change on
-# every command sent to that output. Publishing them as attributes writes that
-# churn into the recorder for no benefit, so keep them out; they are still in
-# the diagnostics dump for anyone who wants to look.
-# (Observed on a PAV-SIPA125, firmware 9.4:706, 2026-09-20.)
-_UNRELIABLE_OUTPUT_KEYS = {
-    "hpffreqleft",
-    "hpffreqright",
-    "hpfrolloffleft",
-    "hpfrolloffright",
-}
 
 _ROUTING_FEATURES = (
     MediaPlayerEntityFeature.SELECT_SOURCE
@@ -80,9 +68,11 @@ _VOLUME_FEATURES = (
 # the full feature set and only this one port is special-cased.
 #
 # Deliberately a fixed port number rather than something inferred from the
-# device payload: this is the only chassis the behaviour has been checked on,
-# and guessing wrong on another model would strip away working controls.
+# device payload, and applied only to the one chassis the behaviour has been
+# checked on: guessing wrong on another model would strip away working
+# controls. When the model couldn't be read at startup, assume the tested one.
 _FIXED_VOLUME_PORT = 6
+_FIXED_VOLUME_MODEL = "SIPA125"
 
 
 async def async_setup_entry(
@@ -105,12 +95,24 @@ async def async_setup_entry(
     )
 
 
-def _as_int(value: Any, default: int) -> int:
+def _as_int[T](value: Any, default: T) -> int | T:
     """Coerce a device value to int."""
     try:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _model(coordinator: SavantDataUpdateCoordinator) -> str | None:
+    """Return the chassis model reported by the device, if any."""
+    return coordinator.constants.get("chassis") or coordinator.status.get("chassis")
+
+
+def _has_fixed_volume_port(coordinator: SavantDataUpdateCoordinator) -> bool:
+    """Return whether output 6 is the known fixed-volume optical out."""
+    if not (model := _model(coordinator)):
+        return True
+    return _FIXED_VOLUME_MODEL in re.sub(r"[^A-Z0-9]", "", str(model).upper())
 
 
 def _device_info(coordinator: SavantDataUpdateCoordinator) -> DeviceInfo:
@@ -122,9 +124,7 @@ def _device_info(coordinator: SavantDataUpdateCoordinator) -> DeviceInfo:
         manufacturer="Savant",
         configuration_url=f"http://{coordinator.client.host}/",
     )
-    if model := (
-        coordinator.constants.get("chassis") or coordinator.status.get("chassis")
-    ):
+    if model := _model(coordinator):
         info["model"] = model
     if firmware := coordinator.status.get("firmwareVersion"):
         info["sw_version"] = firmware
@@ -170,7 +170,7 @@ class SavantZone(
         self._turn_on_source = turn_on_source
         self._last_source: int | None = self._source_id or None
 
-        if port == _FIXED_VOLUME_PORT:
+        if port == _FIXED_VOLUME_PORT and _has_fixed_volume_port(coordinator):
             self._attr_supported_features = _ROUTING_FEATURES
 
         self._attr_unique_id = f"{coordinator.device_id}_zone_{port}"
@@ -221,16 +221,18 @@ class SavantZone(
         return MediaPlayerState.ON if self._source_id else MediaPlayerState.OFF
 
     @property
-    def volume_level(self) -> float:
+    def volume_level(self) -> float | None:
         """Return volume as 0.0-1.0 from the device's dB range."""
-        vol_db = _as_int(self._output.get("volume"), MIN_VOLUME_DB)
+        if (vol_db := _as_int(self._output.get("volume"), None)) is None:
+            return None
         level = (vol_db - MIN_VOLUME_DB) / (MAX_VOLUME_DB - MIN_VOLUME_DB)
         return max(0.0, min(1.0, level))
 
     @property
-    def is_volume_muted(self) -> bool:
+    def is_volume_muted(self) -> bool | None:
         """Return mute state."""
-        mute = self._output.get("mute", False)
+        if (mute := self._output.get("mute")) is None:
+            return None
         if isinstance(mute, str):
             return mute == "muted"
         return bool(mute)
@@ -248,7 +250,7 @@ class SavantZone(
         return {
             key: value
             for key, value in self._output.items()
-            if key not in _STANDARD_OUTPUT_KEYS and key not in _UNRELIABLE_OUTPUT_KEYS
+            if key not in _STANDARD_OUTPUT_KEYS and key not in UNRELIABLE_OUTPUT_KEYS
         }
 
     # ── Commands ──────────────────────────────────────────────────────

@@ -38,6 +38,7 @@
         },
         "error": {
             "cannot_connect": "Failed to connect to the Savant IP Audio device",
+            "cannot_identify": "Connected, but the device did not report its Savant ID, so it can't be confirmed as the device configured here. Try again in a moment.",
             "invalid_auth": "The device rejected the username or password",
             "unknown": "Unexpected error, check the logs for details"
         },
